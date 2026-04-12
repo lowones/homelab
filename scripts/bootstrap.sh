@@ -82,4 +82,4 @@ source ~/homelab/.env
 echo ""
 echo "=== Bootstrap complete ==="
 echo "Run the following to build the cluster:"
-echo "cd ~/homelab/terraform && terraform apply -auto-approve && cd ~/homelab/ansible && ansible-playbook -i inventory.ini all.yml"
+echo "cd ~/homelab/terraform && terraform init && terraform apply -auto-approve && cd ~/homelab/ansible && ansible-playbook -i inventory.ini all.yml"
