@@ -51,3 +51,11 @@ resource "proxmox_virtual_environment_vm" "testbox" {
 }
 # Note: vi mode is handled via Ansible or manual setup
 # Add to ~/.bashrc after SSH: echo 'set -o vi' >> ~/.bashrc
+
+resource "null_resource" "testbox_setup" {
+  depends_on = [proxmox_virtual_environment_vm.testbox]
+
+  provisioner "local-exec" {
+    command = "sleep 30 && ansible-playbook -i '192.168.0.220,' -u ubuntu ${path.module}/../ansible/testbox-setup.yml"
+  }
+}
