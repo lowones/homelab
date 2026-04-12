@@ -5,13 +5,13 @@ echo "=== Homelab Bootstrap ==="
 
 # Install dependencies
 export DEBIAN_FRONTEND=noninteractive
-sudo apt update -qq
-sudo apt install -y git ansible
+sudo DEBIAN_FRONTEND=noninteractive apt update -qq
+sudo DEBIAN_FRONTEND=noninteractive apt install -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" git ansible
 
 # Install Terraform
 wget -O- https://apt.releases.hashicorp.com/gpg | sudo gpg --dearmor -o /usr/share/keyrings/hashicorp-archive-keyring.gpg
 echo "deb [signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] https://apt.releases.hashicorp.com $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/hashicorp.list > /dev/null
-sudo apt update -qq && sudo apt install -y terraform
+sudo DEBIAN_FRONTEND=noninteractive apt update -qq && sudo apt install -y terraform
 
 # Generate SSH keys
 if [ ! -f ~/.ssh/id_ed25519 ]; then
