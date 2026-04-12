@@ -95,3 +95,15 @@ echo ""
 echo "=== Bootstrap complete ==="
 echo "Run the following to build the cluster:"
 echo "source ~/homelab/.env && cd ~/homelab/terraform && terraform init && terraform apply -auto-approve && cd ~/homelab/ansible && ansible-playbook -i inventory.ini all.yml && ssh ubuntu@192.168.0.210 kubectl get nodes"
+
+# Install kubectl
+if ! command -v kubectl &> /dev/null; then
+  curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+  chmod +x kubectl
+  sudo mv kubectl /usr/local/bin/
+fi
+
+# Install Helm
+if ! command -v helm &> /dev/null; then
+  curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+fi
