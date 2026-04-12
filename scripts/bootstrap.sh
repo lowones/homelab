@@ -3,10 +3,11 @@ set -e
 
 echo "=== Homelab Bootstrap ==="
 
-# Install dependencies
-export DEBIAN_FRONTEND=noninteractive
 # Disable needrestart prompts
 sudo sed -i "s/#\$nrconf{restart} = 'i';/\$nrconf{restart} = 'a';/" /etc/needrestart/needrestart.conf 2>/dev/null || true
+
+# Install dependencies
+export DEBIAN_FRONTEND=noninteractive
 sudo DEBIAN_FRONTEND=noninteractive apt update -qq
 sudo DEBIAN_FRONTEND=noninteractive apt install -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" git ansible
 
@@ -36,6 +37,9 @@ Host 192.168.0.*
 SSHEOF
 chmod 600 ~/.ssh/config
 
+# Accept GitHub host key
+ssh-keyscan github.com >> ~/.ssh/known_hosts 2>/dev/null
+
 # Show GitHub key and wait
 echo ""
 echo "=== Add this key to GitHub -> homelab repo -> Settings -> Deploy keys ==="
@@ -43,24 +47,12 @@ cat ~/.ssh/github_ed25519.pub
 echo ""
 read -p "Press Enter once you've added the deploy key to GitHub..."
 
-# Accept GitHub host key
-ssh-keyscan github.com >> ~/.ssh/known_hosts 2>/dev/null
-
 # Clone repo
 if [ ! -d ~/homelab ]; then
   git clone git@github.com:lowones/homelab.git ~/homelab
 else
   echo "homelab repo already exists, pulling latest..."
   cd ~/homelab && git pull
-fi
-
-# Set up env
-if [ ! -f ~/homelab/.env ]; then
-  cp ~/homelab/.env.example ~/homelab/.env
-  sed -i 's/^/export /' ~/homelab/.env
-  echo ""
-  echo "=== Fill in your Proxmox token secret ==="
-  vim ~/homelab/.env
 fi
 
 # Vault password
@@ -72,15 +64,34 @@ if [ ! -f ~/.vault_pass ]; then
   chmod 600 ~/.vault_pass
 fi
 
-# Vi mode
-echo 'set -o vi' >> ~/.bashrc
+# Generate .env from vault
+if [ ! -f ~/homelab/.env ]; then
+  echo "Generating .env from vault..."
+  VAULT="ansible-vault view ~/homelab/ansible/group_vars/all/vault.yml --vault-password-file ~/.vault_pass"
+  API_URL=$(eval $VAULT | grep vault_proxmox_api_url | awk '{print $2}' | tr -d '"')
+  TOKEN_ID=$(eval $VAULT | grep vault_proxmox_token_id | awk '{print $2}' | tr -d '"')
+  TOKEN_SECRET=$(eval $VAULT | grep vault_proxmox_token_secret | awk '{print $2}' | tr -d '"')
 
-# Source env - add to bashrc so it persists
-grep -q "source ~/homelab/.env" ~/. bashrc || echo "source ~/homelab/.env" >> ~/.bashrc
-grep -q "^export" ~/homelab/.env || sed -i "s/^/export /" ~/homelab/.env
+  cat > ~/homelab/.env << ENVEOF
+export PROXMOX_API_URL="${API_URL}"
+export PROXMOX_API_TOKEN_ID="${TOKEN_ID}"
+export PROXMOX_API_TOKEN_SECRET="${TOKEN_SECRET}"
+export TF_VAR_proxmox_api_url=\$PROXMOX_API_URL
+export TF_VAR_proxmox_api_token_id=\$PROXMOX_API_TOKEN_ID
+export TF_VAR_proxmox_api_token_secret=\$PROXMOX_API_TOKEN_SECRET
+ENVEOF
+fi
+
+# Vi mode
+grep -q "set -o vi" ~/.bashrc || echo 'set -o vi' >> ~/.bashrc
+
+# Auto source env on login
+grep -q "source ~/homelab/.env" ~/.bashrc || echo 'source ~/homelab/.env' >> ~/.bashrc
+
+# Source for current session
 source ~/homelab/.env
 
 echo ""
 echo "=== Bootstrap complete ==="
 echo "Run the following to build the cluster:"
-echo "cd ~/homelab/terraform && terraform init && terraform apply -auto-approve && cd ~/homelab/ansible && ansible-playbook -i inventory.ini all.yml"
+echo "source ~/homelab/.env && cd ~/homelab/terraform && terraform init && terraform apply -auto-approve && cd ~/homelab/ansible && ansible-playbook -i inventory.ini all.yml && ssh ubuntu@192.168.0.210 kubectl get nodes"
