@@ -56,6 +56,6 @@ resource "null_resource" "testbox_setup" {
   depends_on = [proxmox_virtual_environment_vm.testbox]
 
   provisioner "local-exec" {
-    command = "sleep 30 && ansible-playbook -i '192.168.0.220,' -u ubuntu ${path.module}/../ansible/testbox-setup.yml"
+    command = "sleep 30 && ansible-playbook --vault-password-file ~/.vault_pass -i '192.168.0.220,' -u ubuntu ${path.module}/../ansible/testbox-setup.yml"
   }
 }
