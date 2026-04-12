@@ -1,3 +1,7 @@
+locals {
+  ssh_public_key = file("~/.ssh/id_ed25519.pub")
+}
+
 resource "proxmox_virtual_environment_vm" "testbox" {
   name      = "testbox"
   node_name = "grid"
