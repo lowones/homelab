@@ -24,17 +24,48 @@
       become_user: ubuntu
       register: argocd_ip
 
-    - name: Get ArgoCD admin password
+    - name: Get ArgoCD initial password
       command: kubectl get secret -n argocd argocd-initial-admin-secret -o jsonpath='{.data.password}'
       become_user: ubuntu
       register: argocd_password_b64
+
+    - name: Decode initial password
+      set_fact:
+        argocd_initial_password: "{{ argocd_password_b64.stdout | b64decode }}"
+
+    - name: Install ArgoCD CLI
+      become: true
+      get_url:
+        url: https://github.com/argoproj/argo-cd/releases/latest/download/argocd-linux-amd64
+        dest: /usr/local/bin/argocd
+        mode: '0755'
+
+    - name: Wait for ArgoCD server to be ready
+      command: kubectl wait --for=condition=available deployment/argocd-server -n argocd --timeout=120s
+      become_user: ubuntu
+
+    - name: Login to ArgoCD
+      command: >
+        argocd login {{ argocd_ip.stdout }}
+        --username admin
+        --password {{ argocd_initial_password }}
+        --insecure
+      become_user: ubuntu
+
+    - name: Update ArgoCD admin password
+      command: >
+        argocd account update-password
+        --current-password {{ argocd_initial_password }}
+        --new-password {{ vault_argocd_password }}
+        --insecure
+      become_user: ubuntu
 
     - name: Show ArgoCD details
       debug:
         msg:
           - "ArgoCD URL: https://{{ argocd_ip.stdout }}"
           - "Username: admin"
-          - "Password (base64): {{ argocd_password_b64.stdout }}"
+          - "Password: {{ vault_argocd_password }}"
 
     - name: Clone k8s-apps repo
       git:
@@ -45,10 +76,4 @@
 
     - name: Apply ArgoCD app manifests
       command: kubectl apply -f /tmp/k8s-apps/argocd/
-      become_user: ubuntu
-
-    - name: Set ArgoCD admin password
-      command: >
-        kubectl -n argocd patch secret argocd-secret
-        -p '{"stringData": {"admin.password": "{{ vault_argocd_password | password_hash("bcrypt") }}", "admin.passwordMtime": "2024-01-01T00:00:00Z"}}'
       become_user: ubuntu
