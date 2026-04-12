@@ -49,3 +49,5 @@ resource "proxmox_virtual_environment_vm" "testbox" {
     }
   }
 }
+# Note: vi mode is handled via Ansible or manual setup
+# Add to ~/.bashrc after SSH: echo 'set -o vi' >> ~/.bashrc

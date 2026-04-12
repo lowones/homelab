@@ -1,0 +1,10 @@
+---
+- name: Configure testbox
+  hosts: all
+  become: false
+  tasks:
+    - name: Set vi mode in bashrc
+      lineinfile:
+        path: ~/.bashrc
+        line: 'set -o vi'
+        create: true
