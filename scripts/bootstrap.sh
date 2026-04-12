@@ -5,6 +5,8 @@ echo "=== Homelab Bootstrap ==="
 
 # Install dependencies
 export DEBIAN_FRONTEND=noninteractive
+# Disable needrestart prompts
+sudo sed -i "s/#\$nrconf{restart} = 'i';/\$nrconf{restart} = 'a';/" /etc/needrestart/needrestart.conf 2>/dev/null || true
 sudo DEBIAN_FRONTEND=noninteractive apt update -qq
 sudo DEBIAN_FRONTEND=noninteractive apt install -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" git ansible
 
@@ -40,6 +42,9 @@ echo "=== Add this key to GitHub -> homelab repo -> Settings -> Deploy keys ==="
 cat ~/.ssh/github_ed25519.pub
 echo ""
 read -p "Press Enter once you've added the deploy key to GitHub..."
+
+# Accept GitHub host key
+ssh-keyscan github.com >> ~/.ssh/known_hosts 2>/dev/null
 
 # Clone repo
 if [ ! -d ~/homelab ]; then
