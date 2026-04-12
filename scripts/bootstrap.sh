@@ -75,7 +75,8 @@ fi
 # Vi mode
 echo 'set -o vi' >> ~/.bashrc
 
-# Source env
+# Source env - add to bashrc so it persists
+grep -q "source ~/homelab/.env" ~/. bashrc || echo "source ~/homelab/.env" >> ~/.bashrc
 grep -q "^export" ~/homelab/.env || sed -i "s/^/export /" ~/homelab/.env
 source ~/homelab/.env
 
