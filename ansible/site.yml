@@ -164,3 +164,13 @@
       command: bash /tmp/join_command.sh
       args:
         creates: /etc/kubernetes/kubelet.conf
+
+- name: Configure shell for all nodes
+  hosts: all
+  become: false
+  tasks:
+    - name: Set vi mode in bashrc
+      lineinfile:
+        path: ~/.bashrc
+        line: 'set -o vi'
+        create: true
