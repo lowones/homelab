@@ -1,0 +1,45 @@
+---
+- name: Install Longhorn prerequisites
+  hosts: all
+  become: true
+  tasks:
+    - name: Install open-iscsi
+      apt:
+        name:
+          - open-iscsi
+          - nfs-common
+        update_cache: true
+
+    - name: Enable iscsid
+      systemd:
+        name: iscsid
+        enabled: true
+        state: started
+
+- name: Install Longhorn
+  hosts: control
+  become: false
+  tasks:
+    - name: Add Longhorn Helm repo
+      command: helm repo add longhorn https://charts.longhorn.io
+
+    - name: Update Helm repos
+      command: helm repo update
+
+    - name: Install Longhorn
+      command: >
+        helm upgrade --install longhorn longhorn/longhorn
+        --namespace longhorn-system
+        --create-namespace
+        --wait
+        --timeout 10m
+      become_user: ubuntu
+
+    - name: Verify Longhorn pods
+      command: kubectl get pods -n longhorn-system
+      become_user: ubuntu
+      register: longhorn_pods
+
+    - name: Show Longhorn pods
+      debug:
+        msg: "{{ longhorn_pods.stdout_lines }}"

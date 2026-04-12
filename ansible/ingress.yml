@@ -1,0 +1,28 @@
+---
+- name: Install Nginx Ingress Controller
+  hosts: control
+  become: false
+  tasks:
+    - name: Add ingress-nginx Helm repo
+      command: helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx
+
+    - name: Update Helm repos
+      command: helm repo update
+
+    - name: Install ingress-nginx
+      command: >
+        helm upgrade --install ingress-nginx ingress-nginx/ingress-nginx
+        --namespace ingress-nginx
+        --create-namespace
+        --set controller.service.type=LoadBalancer
+        --wait
+      become_user: ubuntu
+
+    - name: Get ingress external IP
+      command: kubectl get svc -n ingress-nginx ingress-nginx-controller -o jsonpath='{.status.loadBalancer.ingress[0].ip}'
+      become_user: ubuntu
+      register: ingress_ip
+
+    - name: Show ingress IP
+      debug:
+        msg: "Ingress controller IP: {{ ingress_ip.stdout }}"

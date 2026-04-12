@@ -1,0 +1,24 @@
+---
+- name: Install Helm
+  hosts: control
+  become: true
+  tasks:
+    - name: Download Helm install script
+      get_url:
+        url: https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
+        dest: /tmp/get-helm.sh
+        mode: '0755'
+
+    - name: Install Helm
+      command: /tmp/get-helm.sh
+      args:
+        creates: /usr/local/bin/helm
+
+    - name: Verify Helm
+      command: helm version
+      become_user: ubuntu
+      register: helm_version
+
+    - name: Show Helm version
+      debug:
+        msg: "{{ helm_version.stdout }}"

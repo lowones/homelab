@@ -1,0 +1,166 @@
+---
+- name: Common setup for all nodes
+  hosts: all
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Wait for SSH
+      wait_for_connection:
+        timeout: 120
+        sleep: 5
+
+    - name: Wait for cloud-init to finish
+      command: cloud-init status --wait
+      become: true
+
+
+    - name: Gather facts
+      setup:
+
+    - name: Disable swap
+      command: swapoff -a
+
+    - name: Remove swap from fstab
+      lineinfile:
+        path: /etc/fstab
+        regexp: '.*swap.*'
+        state: absent
+
+    - name: Load kernel modules
+      modprobe:
+        name: "{{ item }}"
+      loop:
+        - overlay
+        - br_netfilter
+
+    - name: Persist kernel modules
+      copy:
+        dest: /etc/modules-load.d/k8s.conf
+        content: |
+          overlay
+          br_netfilter
+
+    - name: Set sysctl params
+      copy:
+        dest: /etc/sysctl.d/k8s.conf
+        content: |
+          net.bridge.bridge-nf-call-iptables  = 1
+          net.bridge.bridge-nf-call-ip6tables = 1
+          net.ipv4.ip_forward                 = 1
+
+    - name: Apply sysctl
+      command: sysctl --system
+
+    - name: Install dependencies
+      apt:
+        name:
+          - apt-transport-https
+          - ca-certificates
+          - curl
+          - gnupg
+          - containerd
+        update_cache: true
+
+    - name: Create containerd config dir
+      file:
+        path: /etc/containerd
+        state: directory
+
+    - name: Generate containerd config
+      shell: containerd config default > /etc/containerd/config.toml
+
+    - name: Enable SystemdCgroup in containerd
+      replace:
+        path: /etc/containerd/config.toml
+        regexp: 'SystemdCgroup = false'
+        replace: 'SystemdCgroup = true'
+
+    - name: Enable and restart containerd
+      systemd:
+        name: containerd
+        enabled: true
+        state: restarted
+
+    - name: Add Kubernetes apt key
+      shell: curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.29/deb/Release.key | gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+      args:
+        creates: /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+
+    - name: Add Kubernetes apt repo
+      copy:
+        dest: /etc/apt/sources.list.d/kubernetes.list
+        content: "deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.29/deb/ /\n"
+
+    - name: Install kubeadm, kubelet, kubectl
+      apt:
+        name:
+          - kubelet
+          - kubeadm
+          - kubectl
+        update_cache: true
+
+    - name: Hold Kubernetes packages
+      dpkg_selections:
+        name: "{{ item }}"
+        selection: hold
+      loop:
+        - kubelet
+        - kubeadm
+        - kubectl
+
+- name: Initialize control plane
+  hosts: control
+  become: true
+  tasks:
+    - name: Initialize kubeadm
+      command: >
+        kubeadm init
+        --pod-network-cidr=10.244.0.0/16
+        --apiserver-advertise-address=192.168.0.210
+      args:
+        creates: /etc/kubernetes/admin.conf
+
+    - name: Create .kube dir for ubuntu user
+      file:
+        path: /home/ubuntu/.kube
+        state: directory
+        owner: ubuntu
+        group: ubuntu
+
+    - name: Copy kubeconfig
+      copy:
+        src: /etc/kubernetes/admin.conf
+        dest: /home/ubuntu/.kube/config
+        remote_src: true
+        owner: ubuntu
+        group: ubuntu
+
+    - name: Install Flannel CNI
+      become_user: ubuntu
+      command: kubectl apply -f https://github.com/flannel-io/flannel/releases/latest/download/kube-flannel.yml
+
+    - name: Get join command
+      command: kubeadm token create --print-join-command
+      register: join_command
+
+    - name: Save join command
+      copy:
+        content: "{{ join_command.stdout }}"
+        dest: /tmp/join_command.sh
+      delegate_to: localhost
+      become: false
+
+- name: Join workers
+  hosts: workers
+  become: true
+  tasks:
+    - name: Copy join command
+      copy:
+        src: /tmp/join_command.sh
+        dest: /tmp/join_command.sh
+        mode: '0755'
+
+    - name: Join cluster
+      command: bash /tmp/join_command.sh
+      args:
+        creates: /etc/kubernetes/kubelet.conf

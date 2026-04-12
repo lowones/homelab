@@ -1,0 +1,42 @@
+---
+- name: Install Prometheus and Grafana
+  hosts: control
+  become: false
+  tasks:
+    - name: Add prometheus-community Helm repo
+      command: helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+
+    - name: Update Helm repos
+      command: helm repo update
+
+    - name: Install kube-prometheus-stack
+      command: >
+        helm upgrade --install monitoring prometheus-community/kube-prometheus-stack
+        --namespace monitoring
+        --create-namespace
+        --set grafana.service.type=LoadBalancer
+        --set grafana.persistence.enabled=true
+        --set grafana.persistence.storageClassName=longhorn
+        --set grafana.persistence.size=2Gi
+        --set prometheus.prometheusSpec.storageSpec.volumeClaimTemplate.spec.storageClassName=longhorn
+        --set prometheus.prometheusSpec.storageSpec.volumeClaimTemplate.spec.resources.requests.storage=10Gi
+        --wait
+        --timeout 10m
+      become_user: ubuntu
+
+    - name: Get Grafana IP
+      command: kubectl get svc -n monitoring monitoring-grafana -o jsonpath='{.status.loadBalancer.ingress[0].ip}'
+      become_user: ubuntu
+      register: grafana_ip
+
+    - name: Get Grafana admin password
+      command: kubectl get secret -n monitoring monitoring-grafana -o jsonpath='{.data.admin-password}'
+      become_user: ubuntu
+      register: grafana_password_b64
+
+    - name: Show Grafana details
+      debug:
+        msg:
+          - "Grafana URL: http://{{ grafana_ip.stdout }}"
+          - "Username: admin"
+          - "Password (base64): {{ grafana_password_b64.stdout }}"

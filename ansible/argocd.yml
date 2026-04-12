@@ -1,0 +1,48 @@
+---
+- name: Install ArgoCD
+  hosts: control
+  become: false
+  tasks:
+    - name: Add ArgoCD Helm repo
+      command: helm repo add argo https://argoproj.github.io/argo-helm
+
+    - name: Update Helm repos
+      command: helm repo update
+
+    - name: Install ArgoCD
+      command: >
+        helm upgrade --install argocd argo/argo-cd
+        --namespace argocd
+        --create-namespace
+        --set server.service.type=LoadBalancer
+        --wait
+        --timeout 10m
+      become_user: ubuntu
+
+    - name: Get ArgoCD IP
+      command: kubectl get svc -n argocd argocd-server -o jsonpath='{.status.loadBalancer.ingress[0].ip}'
+      become_user: ubuntu
+      register: argocd_ip
+
+    - name: Get ArgoCD admin password
+      command: kubectl get secret -n argocd argocd-initial-admin-secret -o jsonpath='{.data.password}'
+      become_user: ubuntu
+      register: argocd_password_b64
+
+    - name: Show ArgoCD details
+      debug:
+        msg:
+          - "ArgoCD URL: https://{{ argocd_ip.stdout }}"
+          - "Username: admin"
+          - "Password (base64): {{ argocd_password_b64.stdout }}"
+
+    - name: Clone k8s-apps repo
+      git:
+        repo: https://github.com/lowones/k8s-apps.git
+        dest: /tmp/k8s-apps
+        version: main
+        force: true
+
+    - name: Apply ArgoCD app manifests
+      command: kubectl apply -f /tmp/k8s-apps/argocd/
+      become_user: ubuntu

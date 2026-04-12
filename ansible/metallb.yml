@@ -1,0 +1,44 @@
+---
+- name: Install MetalLB
+  hosts: control
+  become: false
+  tasks:
+    - name: Add MetalLB Helm repo
+      command: helm repo add metallb https://metallb.github.io/metallb
+      become_user: ubuntu
+
+    - name: Update Helm repos
+      command: helm repo update
+      become_user: ubuntu
+
+    - name: Install MetalLB
+      command: >
+        helm upgrade --install metallb metallb/metallb
+        --namespace metallb-system
+        --create-namespace
+        --wait
+      become_user: ubuntu
+
+    - name: Configure IP address pool
+      become: true
+      copy:
+        dest: /tmp/metallb-config.yml
+        content: |
+          apiVersion: metallb.io/v1beta1
+          kind: IPAddressPool
+          metadata:
+            name: default-pool
+            namespace: metallb-system
+          spec:
+            addresses:
+            - 192.168.0.200-192.168.0.220
+          ---
+          apiVersion: metallb.io/v1beta1
+          kind: L2Advertisement
+          metadata:
+            name: default
+            namespace: metallb-system
+
+    - name: Apply MetalLB config
+      command: kubectl apply -f /tmp/metallb-config.yml
+      become_user: ubuntu

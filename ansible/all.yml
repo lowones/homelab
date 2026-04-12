@@ -1,0 +1,8 @@
+---
+- import_playbook: site.yml
+- import_playbook: helm.yml
+- import_playbook: metallb.yml
+- import_playbook: ingress.yml
+- import_playbook: longhorn.yml
+- import_playbook: monitoring.yml
+- import_playbook: argocd.yml
