@@ -14,7 +14,8 @@
         helm upgrade --install monitoring prometheus-community/kube-prometheus-stack
         --namespace monitoring
         --create-namespace
-        --set grafana.service.type=LoadBalancer
+        --set grafana.service.type=LoadBalancer \
+        --set grafana.adminPassword={{ vault_grafana_password }}
         --set grafana.persistence.enabled=true
         --set grafana.persistence.storageClassName=longhorn
         --set grafana.persistence.size=2Gi

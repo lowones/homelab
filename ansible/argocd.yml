@@ -46,3 +46,9 @@
     - name: Apply ArgoCD app manifests
       command: kubectl apply -f /tmp/k8s-apps/argocd/
       become_user: ubuntu
+
+    - name: Set ArgoCD admin password
+      command: >
+        kubectl -n argocd patch secret argocd-secret
+        -p '{"stringData": {"admin.password": "{{ vault_argocd_password | password_hash("bcrypt") }}", "admin.passwordMtime": "2024-01-01T00:00:00Z"}}'
+      become_user: ubuntu
