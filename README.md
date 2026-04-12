@@ -47,3 +47,16 @@ source .env && cd terraform && terraform destroy -auto-approve && terraform appl
 | Vault password | `~/.vault_pass` (gitignored) |
 | Grafana password | auto-generated, retrieve via kubectl |
 | ArgoCD password | auto-generated, retrieve via kubectl |
+
+## SSH Key Setup
+
+Two SSH keys are required:
+
+| Key | Purpose |
+|-----|---------|
+| ~/.ssh/github_ed25519 | k8s-apps repo deploy key (added to repo settings) |
+| ~/.ssh/github_account_ed25519 | homelab repo account key (added to GitHub account) |
+
+Remotes:
+- homelab: git@github-account:lowones/homelab.git
+- k8s-apps: git@github.com:lowones/k8s-apps.git
