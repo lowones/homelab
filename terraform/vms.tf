@@ -70,7 +70,7 @@ resource "proxmox_virtual_environment_vm" "k8s_worker_1" {
   }
 
   memory {
-    dedicated = 8192
+    dedicated = 4096
   }
 
   disk {
@@ -118,7 +118,7 @@ resource "proxmox_virtual_environment_vm" "k8s_worker_2" {
   }
 
   memory {
-    dedicated = 8192
+    dedicated = 4096
   }
 
   disk {
@@ -166,7 +166,7 @@ resource "proxmox_virtual_environment_vm" "k8s_worker_3" {
   }
 
   memory {
-    dedicated = 8192
+    dedicated = 4096
   }
 
   disk {
