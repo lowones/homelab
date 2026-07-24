@@ -1,0 +1,17 @@
+[Unit]
+Description=Cloudflare DDNS update for home.low-ones.com
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/ddns-cloudflare.env
+ExecStart=/usr/local/bin/ddns-cloudflare.sh
+
+# hardening
+DynamicUser=false
+User=root
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
