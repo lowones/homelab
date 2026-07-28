@@ -6,6 +6,7 @@
 # read-only access on homelab/cloudflare. No secrets are stored in this file.
 #
 # Runs on oracle (192.168.0.240) under a systemd timer.
+# Repo: lowones/homelab under oracle/
 
 set -euo pipefail
 
