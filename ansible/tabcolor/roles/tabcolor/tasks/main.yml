@@ -1,0 +1,53 @@
+---
+- name: Deploy iTerm2 tab colour script
+  ansible.builtin.template:
+    src: tabcolor.sh.j2
+    dest: /etc/profile.d/tabcolor.sh
+    owner: root
+    group: root
+    mode: "0644"
+  become: true
+
+# check_mode: false — this is read-only, and skipping it in --check leaves the
+# version fact empty, which breaks every conditional downstream.
+- name: Detect tmux
+  ansible.builtin.command: tmux -V
+  register: tabcolor_tmux
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+# regex_search returns none when tmux is absent; default('', true) normalises
+# that to an empty string so the version test below is safe either way.
+- name: Record tmux version
+  ansible.builtin.set_fact:
+    tabcolor_tmux_version: >-
+      {{ (tabcolor_tmux.stdout | default('', true)
+          | regex_search('[0-9]+\.[0-9]+[a-z]?')) | default('', true) }}
+
+# allow-passthrough arrived in tmux 3.3. On 3.2 and earlier passthrough is
+# unconditional AND the option does not exist, so setting it throws an error
+# on every tmux start. The version gate is load-bearing, not cosmetic.
+- name: Configure tmux passthrough (3.3+ only)
+  ansible.builtin.blockinfile:
+    path: "{{ ansible_env.HOME }}/.tmux.conf"
+    create: true
+    mode: "0644"
+    marker: "# {mark} ANSIBLE MANAGED BLOCK - tabcolor"
+    block: |
+      set -g allow-passthrough on
+      set -ga update-environment " LC_TERMINAL"
+  when:
+    - tabcolor_tmux_version | length > 0
+    - tabcolor_tmux_version is version('3.3', '>=')
+
+- name: Report
+  ansible.builtin.debug:
+    msg: >-
+      {{ inventory_hostname }}:
+      rgb={{ tab_color.r }},{{ tab_color.g }},{{ tab_color.b }}
+      tmux={{ tabcolor_tmux_version | default('absent', true) }}
+      passthrough={{ 'configured'
+        if (tabcolor_tmux_version | length > 0
+            and tabcolor_tmux_version is version('3.3', '>='))
+        else 'not required' }}

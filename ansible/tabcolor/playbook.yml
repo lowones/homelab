@@ -1,0 +1,6 @@
+---
+- name: Deploy iTerm2 per-host tab colouring
+  hosts: tabcolor
+  gather_facts: true
+  roles:
+    - tabcolor

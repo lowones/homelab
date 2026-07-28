@@ -1,0 +1,44 @@
+# {{ ansible_managed }}
+# Source: lowones/homelab -> ansible/roles/tabcolor
+# Sets the iTerm2 tab colour to identify this host. Do not edit in place.
+
+# Interactive shells only.
+case $- in *i*) ;; *) return ;; esac
+
+# iTerm2 only. Termius, the Proxmox console, cron, and plain TTYs skip this
+# rather than printing escape codes as literal garbage.
+[ "${LC_TERMINAL:-}" = "iTerm2" ] || return
+
+# Never emit into a pipe or a command substitution.
+[ -t 1 ] || return
+
+if [ "$(id -u)" = "0" ]; then
+    TC_R={{ tab_color_root.r }}; TC_G={{ tab_color_root.g }}; TC_B={{ tab_color_root.b }}
+else
+    TC_R={{ tab_color.r }}; TC_G={{ tab_color.g }}; TC_B={{ tab_color.b }}
+fi
+
+# tmux swallows OSC unless wrapped in a DCS passthrough envelope, with every
+# inner ESC doubled. Requires 'allow-passthrough on' for tmux >= 3.3.
+_tab_osc() {
+    if [ -n "${TMUX:-}" ]; then
+        printf '\033Ptmux;\033\033]6;1;bg;%s;brightness;%s\a\033\\' "$1" "$2"
+    else
+        printf '\033]6;1;bg;%s;brightness;%s\a' "$1" "$2"
+    fi
+}
+
+_tabcolor() {
+    _tab_osc red   "$TC_R"
+    _tab_osc green "$TC_G"
+    _tab_osc blue  "$TC_B"
+}
+
+# Repaint before every prompt rather than once on connect. This is what makes
+# nested hops self-healing: exiting an inner session repaints the outer host's
+# colour automatically, where a reset-on-exit would clear to default instead.
+# Guarded so nested sourcing (sudo -i) can't stack duplicates.
+case "${PROMPT_COMMAND:-}" in
+    *_tabcolor*) ;;
+    *) PROMPT_COMMAND="_tabcolor${PROMPT_COMMAND:+; $PROMPT_COMMAND}" ;;
+esac

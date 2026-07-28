@@ -1,0 +1,14 @@
+---
+# Fallback if a host has no host_vars entry — deliberately drab so an
+# unconfigured host is visually obvious rather than silently plausible.
+tab_color:
+  r: 60
+  g: 60
+  b: 60
+
+# Root gets a distinct shade on every host. Same hue family would defeat the
+# purpose; hot red reads as "you are root" at a glance.
+tab_color_root:
+  r: 230
+  g: 30
+  b: 30
