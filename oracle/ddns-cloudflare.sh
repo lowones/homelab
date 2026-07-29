@@ -68,7 +68,7 @@ else
 fi
 
 if [ -n "$HEALTHCHECK_URL" ]; then
-  curl -sf -m 10 "$HEALTHCHECK_URL" >/dev/null 2>&1 || log "warning: healthcheck ping failed"
+  curl -sf -m 10 --retry 3 --retry-delay 2 "$HEALTHCHECK_URL" >/dev/null 2>&1 || log "warning: healthcheck ping failed"
 fi
 
 exit 0
