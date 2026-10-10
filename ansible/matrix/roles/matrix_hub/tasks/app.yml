@@ -36,8 +36,10 @@
     times: true
     checksum: true
     # D2775 keeps the target directories group-writable and setgid (rsync -p
-    # would otherwise copy the source directory's mode onto them).
-    rsync_opts: "{{ matrix_hub_sync_excludes | map('regex_replace', '^', '--exclude=') | list + ['--chmod=D2775'] }}"
+    # would otherwise copy the source directory's mode onto them). --omit-dir-times:
+    # files added to bin/ later (lowlib.py, __pycache__) bump the directory's mtime,
+    # which would otherwise show as a change on every following run.
+    rsync_opts: "{{ matrix_hub_sync_excludes | map('regex_replace', '^', '--exclude=') | list + ['--chmod=D2775', '--omit-dir-times'] }}"
   loop: "{{ matrix_hub_sync_dirs }}"
   when: matrix_hub_rsync_stat.stat.exists or not ansible_check_mode
 
@@ -46,7 +48,6 @@
     src: "{{ matrix_hub_lowlib_src }}"
     dest: "{{ matrix_base }}/bin/lowlib.py"
     owner: "{{ matrix_user }}"
-    group: "{{ matrix_hub_owner_group }}"
     mode: "0644"
 
 - name: Write matrix.conf
@@ -54,7 +55,6 @@
     src: matrix.conf.j2
     dest: "{{ matrix_base }}/etc/matrix.conf"
     owner: "{{ matrix_user }}"
-    group: "{{ matrix_hub_owner_group }}"
     mode: "0644"
 
 # matrix.env (the healthcheck UUIDs) is deliberately NOT deployed in this phase.

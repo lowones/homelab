@@ -20,6 +20,12 @@
   become: true
   when: not (ansible_check_mode and matrix_hub_group.changed)
 
+# A running ssh session keeps the group list it logged in with, so without a
+# fresh connection the new membership is not usable (chgrp to matrix fails and
+# rsync cannot keep the setgid bit on the directories).
+- name: Open a fresh connection so the new group membership applies
+  ansible.builtin.meta: reset_connection
+
 - name: Install packages
   ansible.builtin.apt:
     name: "{{ matrix_hub_packages }}"
