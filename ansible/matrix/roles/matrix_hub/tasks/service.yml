@@ -1,0 +1,40 @@
+---
+# Installed so the hub is ready to cut over to, but never enabled or started
+# here: two hubs pushing to low-ones and pinging healthchecks would fight.
+- name: Install the monitor unit
+  ansible.builtin.copy:
+    src: "{{ matrix_hub_unit_src }}"
+    dest: /etc/systemd/system/matrix-monitor.service
+    owner: root
+    group: root
+    mode: "0644"
+  become: true
+  notify: Reload systemd
+
+- name: Create the unit drop-in directory
+  ansible.builtin.file:
+    path: /etc/systemd/system/matrix-monitor.service.d
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  become: true
+
+- name: Install the resource-guard drop-in
+  ansible.builtin.template:
+    src: limits.conf.j2
+    dest: /etc/systemd/system/matrix-monitor.service.d/10-limits.conf
+    owner: root
+    group: root
+    mode: "0644"
+  become: true
+  notify: Reload systemd
+
+- name: Install the logrotate rule
+  ansible.builtin.copy:
+    src: "{{ matrix_hub_logrotate_src }}"
+    dest: /etc/logrotate.d/matrix-monitor
+    owner: root
+    group: root
+    mode: "0644"
+  become: true

@@ -1,0 +1,27 @@
+---
+- name: Stat the required source files on the controller
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop:
+    - "{{ matrix_src }}/bin/image_update_monitor.py"
+    - "{{ matrix_src }}/bin/matrix_config.py"
+    - "{{ matrix_hub_unit_src }}"
+    - "{{ matrix_hub_logrotate_src }}"
+    - "{{ matrix_hub_lowlib_src }}"
+  delegate_to: localhost
+  become: false
+  run_once: true
+  register: matrix_hub_src_stat
+  changed_when: false
+  check_mode: false
+
+- name: Fail early if any source file is missing
+  ansible.builtin.assert:
+    that: matrix_hub_src_stat.results | rejectattr('stat.exists') | list | length == 0
+    fail_msg: >-
+      Missing on the controller:
+      {{ matrix_hub_src_stat.results | rejectattr('stat.exists') | map(attribute='item') | list }}
+      (matrix_src={{ matrix_src }}). Clone matrix_matrix there, and put Tron's
+      lowlib.py at vendor/lowlib.py.
+    quiet: true
+  run_once: true

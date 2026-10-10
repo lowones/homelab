@@ -1,0 +1,31 @@
+---
+# Shared variables (matrix_src, matrix_base, matrix_user, matrix_nodes, ...) live in
+# ../../group_vars/all.yml.
+
+matrix_hub_dirs: "{{ ['bin', 'etc', 'log', 'deploy', 'stash', 'outbound', 'update', 'inbound'] + matrix_nodes }}"
+matrix_hub_packages: [rsync, imagemagick, python3-venv, git, openssh-client]
+matrix_hub_pip_packages: [requests, psutil]
+
+# Subdirectories of matrix_src rsynced to {{ matrix_base }}/<dir>/ (no --delete).
+matrix_hub_sync_dirs: [bin, deploy]
+matrix_hub_sync_excludes: ["bak/", "nodes/", "__pycache__/", "*.pyc"]
+
+# Source files, relative to matrix_src. lowlib is vendored from Tron.
+matrix_hub_lowlib_src: "{{ matrix_src }}/vendor/lowlib.py"
+matrix_hub_unit_src: "{{ matrix_src }}/deploy/tron/matrix-monitor.service"
+matrix_hub_logrotate_src: "{{ matrix_src }}/deploy/tron/logrotate-matrix-monitor"
+
+# Resource guard so a runaway monitor cannot starve AdGuard/DDNS on this box.
+matrix_hub_cpu_quota: 150%
+matrix_hub_memory_max: 768M
+
+# Public keys allowed to log in as matrix_user: one per line, on the controller,
+# OUTSIDE git. Skipped if the file does not exist.
+matrix_hub_authorized_keys_file: "{{ lookup('ansible.builtin.env', 'HOME') }}/.ansible-matrix/authorized_keys"
+
+# The hub's own key (generated on the hub if missing) and the aliases it needs.
+matrix_hub_ssh_key_name: id_ed25519_matrix
+matrix_hub_ssh_hosts:
+  - { alias: low-ones, hostname: service.low-ones.com, port: 7822 }
+  - { alias: cabin, hostname: 192.168.0.232, port: 22 }
+  - { alias: driveway, hostname: 192.168.0.233, port: 22 }

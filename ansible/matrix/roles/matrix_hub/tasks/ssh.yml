@@ -1,0 +1,63 @@
+---
+- name: Ensure ~/.ssh exists
+  ansible.builtin.file:
+    path: "{{ ansible_facts['env']['HOME'] }}/.ssh"
+    state: directory
+    mode: "0700"
+
+- name: Generate the hub's own SSH key
+  ansible.builtin.command:
+    argv:
+      - ssh-keygen
+      - -q
+      - -t
+      - ed25519
+      - -N
+      - ""
+      - -C
+      - "{{ matrix_user }}@{{ inventory_hostname }}-matrix-hub"
+      - -f
+      - "{{ ansible_facts['env']['HOME'] }}/.ssh/{{ matrix_hub_ssh_key_name }}"
+    creates: "{{ ansible_facts['env']['HOME'] }}/.ssh/{{ matrix_hub_ssh_key_name }}"
+
+- name: Add the hub's host aliases to ~/.ssh/config
+  ansible.builtin.blockinfile:
+    path: "{{ ansible_facts['env']['HOME'] }}/.ssh/config"
+    create: true
+    mode: "0600"
+    marker: "# {mark} ANSIBLE MANAGED BLOCK - matrix hub"
+    block: "{{ lookup('ansible.builtin.template', 'ssh_config.j2') }}"
+
+- name: Look for an authorized_keys source file on the controller
+  ansible.builtin.stat:
+    path: "{{ matrix_hub_authorized_keys_file }}"
+  delegate_to: localhost
+  become: false
+  register: matrix_hub_keys_stat
+  changed_when: false
+  check_mode: false
+
+- name: Authorize the listed public keys (existing keys are kept)
+  ansible.posix.authorized_key:
+    user: "{{ matrix_user }}"
+    key: "{{ lookup('ansible.builtin.file', matrix_hub_authorized_keys_file) }}"
+    state: present
+    exclusive: false
+  when: matrix_hub_keys_stat.stat.exists
+
+- name: Note that no authorized_keys file was found
+  ansible.builtin.debug:
+    msg: "{{ matrix_hub_authorized_keys_file }} not found on the controller; authorized_keys left untouched."
+  when: not matrix_hub_keys_stat.stat.exists
+
+- name: Read the hub's public key
+  ansible.builtin.slurp:
+    src: "{{ ansible_facts['env']['HOME'] }}/.ssh/{{ matrix_hub_ssh_key_name }}.pub"
+  register: matrix_hub_pubkey
+  failed_when: false
+  check_mode: false
+
+- name: Show the public key to authorize on the Pis and low-ones
+  ansible.builtin.debug:
+    msg: "{{ matrix_hub_pubkey.content | b64decode | trim }}"
+  when: matrix_hub_pubkey.content is defined

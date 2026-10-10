@@ -1,0 +1,58 @@
+---
+- name: Create the shared group
+  ansible.builtin.group:
+    name: "{{ matrix_group }}"
+    state: present
+  become: true
+  register: matrix_hub_group
+
+# --check on a fresh host: the group does not exist yet, so anything that names
+# it would fail. Use root as a stand-in for ownership until it really exists.
+- name: Pick a group name that is safe to use for ownership
+  ansible.builtin.set_fact:
+    matrix_hub_owner_group: "{{ 'root' if (ansible_check_mode and matrix_hub_group.changed) else matrix_group }}"
+
+- name: Add the service user to it
+  ansible.builtin.user:
+    name: "{{ matrix_user }}"
+    groups: "{{ matrix_group }}"
+    append: true
+  become: true
+  when: not (ansible_check_mode and matrix_hub_group.changed)
+
+- name: Install packages
+  ansible.builtin.apt:
+    name: "{{ matrix_hub_packages }}"
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+  become: true
+
+# The monitor shells out to `convert` (ImageMagick 6 on Tron). Debian 13 ships
+# ImageMagick 7, which may only provide `magick`.
+- name: Probe for convert
+  ansible.builtin.command: convert -version
+  register: matrix_hub_convert
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Provide convert via magick if only IM7's magick exists
+  ansible.builtin.file:
+    src: /usr/bin/magick
+    dest: /usr/local/bin/convert
+    state: link
+  become: true
+  when:
+    - matrix_hub_convert.rc != 0
+    - not ansible_check_mode
+
+- name: Create the matrix directory tree
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ matrix_user }}"
+    group: "{{ matrix_hub_owner_group }}"
+    mode: "2775"
+  become: true
+  loop: "{{ [matrix_base] + (matrix_hub_dirs | map('regex_replace', '^', matrix_base ~ '/') | list) }}"

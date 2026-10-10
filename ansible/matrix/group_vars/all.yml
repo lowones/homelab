@@ -1,0 +1,16 @@
+---
+# Variables shared by every matrix role (hub now; Pis and low-ones later).
+
+# Checkout of the (private) matrix_matrix app repo on the CONTROLLER. Files are
+# pushed from here, so targets never need GitHub access.
+matrix_src: "{{ lookup('ansible.builtin.env', 'HOME') }}/dev/matrix_matrix"
+
+matrix_base: /matrix
+matrix_user: lowone
+matrix_group: matrix
+matrix_nodes: [cabin, driveway]
+
+# Written to {{ matrix_base }}/etc/matrix.conf
+matrix_remote_server: low-ones
+matrix_stale_duration: 5
+matrix_hc_base: https://hc-ping.com

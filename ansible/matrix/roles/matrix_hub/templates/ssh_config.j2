@@ -1,0 +1,8 @@
+{% for h in matrix_hub_ssh_hosts %}
+Host {{ h.alias }}
+    HostName {{ h.hostname }}
+    Port {{ h.port }}
+    User {{ matrix_user }}
+    IdentityFile ~/.ssh/{{ matrix_hub_ssh_key_name }}
+    IdentitiesOnly yes
+{% endfor %}

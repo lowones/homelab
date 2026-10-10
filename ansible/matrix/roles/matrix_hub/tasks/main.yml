@@ -1,0 +1,13 @@
+---
+- name: Check sources on the controller
+  ansible.builtin.import_tasks: preflight.yml
+- name: Base system (group, packages, directories)
+  ansible.builtin.import_tasks: base.yml
+- name: Application files and Python environment
+  ansible.builtin.import_tasks: app.yml
+- name: Systemd units and logrotate (installed, not started)
+  ansible.builtin.import_tasks: service.yml
+- name: SSH keys and aliases
+  ansible.builtin.import_tasks: ssh.yml
+- name: Verify
+  ansible.builtin.import_tasks: verify.yml

@@ -1,0 +1,49 @@
+---
+- name: Create the virtualenv and install Python packages
+  ansible.builtin.pip:
+    name: "{{ matrix_hub_pip_packages }}"
+    virtualenv: "{{ matrix_base }}/.venv"
+    virtualenv_command: python3 -m venv
+
+# --check on a fresh host: rsync is not installed on the target yet, and
+# synchronize needs it on both ends even for a dry run.
+- name: Probe for rsync on the target
+  ansible.builtin.stat:
+    path: /usr/bin/rsync
+  register: matrix_hub_rsync_stat
+  check_mode: false
+
+# rsync runs as the login user; the target dirs are owned by matrix_user, so no
+# become. No --delete: lowlib.py (below) lives in bin/ but is not in the source.
+- name: Sync application files from the controller checkout
+  ansible.posix.synchronize:
+    src: "{{ matrix_src }}/{{ item }}/"
+    dest: "{{ matrix_base }}/{{ item }}/"
+    archive: false
+    recursive: true
+    perms: true
+    times: true
+    checksum: true
+    # D2775 keeps the target directories group-writable and setgid (rsync -p
+    # would otherwise copy the source directory's mode onto them).
+    rsync_opts: "{{ matrix_hub_sync_excludes | map('regex_replace', '^', '--exclude=') | list + ['--chmod=D2775'] }}"
+  loop: "{{ matrix_hub_sync_dirs }}"
+  when: matrix_hub_rsync_stat.stat.exists or not ansible_check_mode
+
+- name: Install lowlib next to the monitor
+  ansible.builtin.copy:
+    src: "{{ matrix_hub_lowlib_src }}"
+    dest: "{{ matrix_base }}/bin/lowlib.py"
+    owner: "{{ matrix_user }}"
+    group: "{{ matrix_hub_owner_group }}"
+    mode: "0644"
+
+- name: Write matrix.conf
+  ansible.builtin.template:
+    src: matrix.conf.j2
+    dest: "{{ matrix_base }}/etc/matrix.conf"
+    owner: "{{ matrix_user }}"
+    group: "{{ matrix_hub_owner_group }}"
+    mode: "0644"
+
+# matrix.env (the healthcheck UUIDs) is deliberately NOT deployed in this phase.

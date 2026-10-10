@@ -1,0 +1,52 @@
+---
+# Read-only checks. Skipped in --check mode, where nothing has been installed.
+- name: Import lowlib with the hub's Python
+  ansible.builtin.command:
+    cmd: "{{ matrix_base }}/.venv/bin/python -c 'import sys, lowlib; print(sys.version.split()[0], lowlib.__file__)'"
+    chdir: "{{ matrix_base }}/bin"
+  register: matrix_hub_lowlib
+  changed_when: false
+  when: not ansible_check_mode
+
+- name: Byte-compile the monitor and its config module
+  ansible.builtin.command:
+    cmd: "{{ matrix_base }}/.venv/bin/python -m py_compile image_update_monitor.py matrix_config.py"
+    chdir: "{{ matrix_base }}/bin"
+  changed_when: false
+  when: not ansible_check_mode
+
+- name: Confirm convert works
+  ansible.builtin.command: convert -version
+  register: matrix_hub_convert_final
+  changed_when: false
+  when: not ansible_check_mode
+
+- name: Confirm rsync works
+  ansible.builtin.command: rsync --version  # noqa: command-instead-of-module
+  register: matrix_hub_rsync
+  changed_when: false
+  when: not ansible_check_mode
+
+- name: Check that no matrix service is running yet
+  ansible.builtin.command: "systemctl is-active {{ item }}"  # noqa: command-instead-of-module
+  loop: [matrix-monitor.service, tunnel-lowones.service]
+  register: matrix_hub_active
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Assert nothing is running
+  ansible.builtin.assert:
+    that: matrix_hub_active.results | selectattr('stdout', 'equalto', 'active') | list | length == 0
+    fail_msg: >-
+      A matrix service is already active on {{ inventory_hostname }}. This phase
+      must not run alongside Tron. Stop it first.
+    quiet: true
+
+- name: Report
+  ansible.builtin.debug:
+    msg:
+      - "python / lowlib: {{ matrix_hub_lowlib.stdout | default('skipped in check mode') }}"
+      - "convert: {{ (matrix_hub_convert_final.stdout_lines | default(['skipped in check mode']))[0] }}"
+      - "rsync: {{ (matrix_hub_rsync.stdout_lines | default(['skipped in check mode']))[0] }}"
+      - "matrix services active: none (monitor and tunnel are installed but stopped)"

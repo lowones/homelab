@@ -1,0 +1,12 @@
+---
+# Prepare Oracle as the matrix camera hub. Installs and configures everything
+# but does NOT enable or start any matrix service, so it cannot compete with
+# Tron (which is still the live hub).
+#
+#   ansible-playbook hub.yml --check --diff -K     # dry run first
+#   ansible-playbook hub.yml -K
+- name: Prepare the matrix camera hub
+  hosts: matrix_hub
+  gather_facts: true
+  roles:
+    - matrix_hub
