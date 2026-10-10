@@ -24,6 +24,10 @@
   ansible.builtin.apt:
     name: "{{ matrix_hub_packages }}"
     state: present
+    # Without recommends ImageMagick skips ghostscript, fonts, cups and the
+    # extra image delegates (dozens of packages this DNS box does not need).
+    # verify.yml resizes a real JPEG to prove the core build is enough.
+    install_recommends: false
     update_cache: true
     cache_valid_time: 3600
   become: true

@@ -1,9 +1,20 @@
 ---
+# The pip module imports `packaging` with the interpreter Ansible uses on the
+# target. python3-packaging is installed by the apt task, so in --check on a
+# fresh host it is still missing and the module would fail before its dry run.
+- name: Probe for the pip module's Python dependency
+  ansible.builtin.command: "{{ ansible_facts['python']['executable'] }} -c 'import packaging'"
+  register: matrix_hub_packaging
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
 - name: Create the virtualenv and install Python packages
   ansible.builtin.pip:
     name: "{{ matrix_hub_pip_packages }}"
     virtualenv: "{{ matrix_base }}/.venv"
     virtualenv_command: python3 -m venv
+  when: matrix_hub_packaging.rc == 0 or not ansible_check_mode
 
 # --check on a fresh host: rsync is not installed on the target yet, and
 # synchronize needs it on both ends even for a dry run.

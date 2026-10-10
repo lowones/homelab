@@ -3,7 +3,8 @@
 # ../../group_vars/all.yml.
 
 matrix_hub_dirs: "{{ ['bin', 'etc', 'log', 'deploy', 'stash', 'outbound', 'update', 'inbound'] + matrix_nodes }}"
-matrix_hub_packages: [rsync, imagemagick, python3-venv, git, openssh-client]
+# python3-packaging: the ansible pip module imports it on the target.
+matrix_hub_packages: [rsync, imagemagick, python3-venv, python3-packaging, git, openssh-client]
 matrix_hub_pip_packages: [requests, psutil]
 
 # Subdirectories of matrix_src rsynced to {{ matrix_base }}/<dir>/ (no --delete).

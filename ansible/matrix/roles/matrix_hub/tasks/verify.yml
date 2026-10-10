@@ -21,6 +21,27 @@
   changed_when: false
   when: not ansible_check_mode
 
+# Same call the monitor makes (resize to 1920px wide, quality 85), on a real JPEG.
+- name: Resize a test JPEG with convert
+  ansible.builtin.shell:
+    executable: /bin/bash
+    cmd: |
+      set -e
+      t=$(mktemp -d)
+      convert -size 2400x1600 xc:gray "$t/in.jpg"
+      convert "$t/in.jpg" -resize 1920x -quality 85 "$t/out.jpg"
+      convert "$t/out.jpg" -format '%w' info:
+      rm -rf "$t"
+  register: matrix_hub_resize
+  changed_when: false
+  when: not ansible_check_mode
+
+- name: Assert the resize produced a 1920px-wide image
+  ansible.builtin.assert:
+    that: matrix_hub_resize.stdout | trim == '1920'
+    quiet: true
+  when: not ansible_check_mode
+
 - name: Confirm rsync works
   ansible.builtin.command: rsync --version  # noqa: command-instead-of-module
   register: matrix_hub_rsync
