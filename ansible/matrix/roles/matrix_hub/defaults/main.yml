@@ -42,7 +42,8 @@ matrix_hub_dry_run: true
 matrix_hub_shadow: false
 matrix_hub_shadow_host: 192.168.0.2
 matrix_hub_shadow_alias: tron
-matrix_hub_shadow_interval: 10s
+# Cameras write a new frame about every 30 s; do not poll the live hub faster than that.
+matrix_hub_shadow_interval: 30s
 # Optional: expected Tron ed25519 host key fingerprint ("SHA256:..."). If set,
 # the play fails when the scanned key does not match. Get it on Tron with:
 #   ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub

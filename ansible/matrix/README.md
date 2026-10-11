@@ -51,10 +51,12 @@ Then from the controller:
 This also scans Tron's ed25519 host key and prints its fingerprint; compare with
 `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` on Tron, or pass
 `-e matrix_hub_shadow_hostkey_fingerprint=SHA256:...` to make the play check it.
-It installs `matrix-shadow-feed.timer` (every 10 s: rsync each `<node>/<node>.jpg`
-from Tron and touch `/matrix/update/<node>` when it changed), then starts the
-timer and `matrix-monitor`. Watch it with `journalctl -u matrix-monitor -f`:
-expect `DRY RUN: would rsync ...` roughly as often as Tron really pushes.
+It installs `matrix-shadow-feed.timer` (every 30 s: rsync each `<node>/<node>.jpg`
+from Tron, read-only), then starts the timer and `matrix-monitor`. The feed does
+not touch the update triggers, because Tron only pushes on its 5-minute stale
+poll. Watch the monitor with `tail -f /matrix/log/monitor.log` (the unit logs to
+that file, not the journal): expect about one `DRY RUN: would rsync ...` per
+camera every 5 minutes, the same as Tron's real pushes.
 
 End the shadow run (the play refuses to run without `matrix_hub_shadow=true`
 while the monitor is up):

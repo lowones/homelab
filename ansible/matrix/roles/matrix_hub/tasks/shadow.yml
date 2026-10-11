@@ -76,7 +76,9 @@
         mode: "0644"
       loop: [matrix-shadow-feed.service, matrix-shadow-feed.timer]
       become: true
-      notify: Reload systemd
+      notify:
+        - Reload systemd
+        - Restart shadow feed timer
 
     - name: Make the new units visible to systemd
       ansible.builtin.meta: flush_handlers

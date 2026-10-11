@@ -12,3 +12,11 @@
     state: restarted
   become: true
   when: matrix_hub_shadow | bool and not ansible_check_mode
+
+# A changed interval only applies to a running timer after a restart.
+- name: Restart shadow feed timer
+  ansible.builtin.systemd:
+    name: matrix-shadow-feed.timer
+    state: restarted
+  become: true
+  when: matrix_hub_shadow | bool and not ansible_check_mode

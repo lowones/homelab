@@ -80,9 +80,15 @@
       loop: [matrix-monitor.service, matrix-shadow-feed.timer]
       changed_when: false
 
+    # The unit appends stdout/stderr to {{ matrix_base }}/log/monitor.log (not the journal).
+    - name: Wait for the monitor to log that it started
+      ansible.builtin.wait_for:
+        path: "{{ matrix_base }}/log/monitor.log"
+        search_regex: "nodes: "
+        timeout: 30
+
     - name: Last lines of the monitor log
-      ansible.builtin.command: journalctl -u matrix-monitor.service -n 12 --no-pager -o cat
-      become: true
+      ansible.builtin.command: "tail -n 12 {{ matrix_base }}/log/monitor.log"
       register: matrix_hub_shadow_log
       changed_when: false
 

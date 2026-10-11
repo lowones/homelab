@@ -1,18 +1,14 @@
 #!/bin/bash
 # Managed by Ansible. Shadow run only: copies each camera's current image from
-# Tron (read-only, rrsync-restricted key) into {{ matrix_base }}/<node>/ and
-# touches the update trigger when it changed, as a Pi push would.
+# Tron (read-only, rrsync-restricted key) into {{ matrix_base }}/<node>/.
 # rsync -t keeps Tron's mtime, so the monitor's "newer than last push" logic works.
+# It deliberately does NOT touch {{ matrix_base }}/update/<node>: Tron's monitor only
+# pushes on its stale poll (every STALE_DURATION minutes) unless a trigger is
+# requested by hand, so the shadow monitor does the same.
 set -u
 for node in {{ matrix_nodes | join(' ') }}; do
-  if out=$(rsync -t --timeout=20 --itemize-changes \
+  rsync -t --timeout=20 \
         -e "ssh -o BatchMode=yes -o ConnectTimeout=10" \
-        "{{ matrix_hub_shadow_alias }}:${node}/${node}.jpg" "{{ matrix_base }}/${node}/"); then
-    if [ -n "$out" ]; then
-      touch "{{ matrix_base }}/update/${node}"
-      echo "feed: ${node} updated"
-    fi
-  else
-    echo "feed: rsync from {{ matrix_hub_shadow_alias }} failed for ${node}" >&2
-  fi
+        "{{ matrix_hub_shadow_alias }}:${node}/${node}.jpg" "{{ matrix_base }}/${node}/" \
+    || echo "feed: rsync from {{ matrix_hub_shadow_alias }} failed for ${node}" >&2
 done
