@@ -9,6 +9,8 @@
   ansible.builtin.import_tasks: service.yml
 - name: SSH keys and aliases
   ansible.builtin.import_tasks: ssh.yml
+- name: Low-ones trust and the tunnel unit (installed, not enabled)
+  ansible.builtin.import_tasks: lowones.yml
 - name: Shadow run (dry-run monitor fed from Tron), only when matrix_hub_shadow is true
   ansible.builtin.import_tasks: shadow.yml
 - name: Verify

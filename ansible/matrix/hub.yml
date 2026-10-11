@@ -1,7 +1,8 @@
 ---
-# Prepare Oracle as the matrix camera hub. Installs and configures everything
-# but does NOT enable or start any matrix service, so it cannot compete with
-# Tron (which is still the live hub).
+# Prepare Oracle as the matrix camera hub. Installs and configures everything.
+# By default it does NOT enable or start any matrix service, so it cannot compete
+# with Tron (the live hub). With -e matrix_hub_shadow=true it also runs the
+# dry-run shadow monitor fed from Tron (see README).
 #
 #   ansible-playbook hub.yml --check --diff -K     # dry run first
 #   ansible-playbook hub.yml -K

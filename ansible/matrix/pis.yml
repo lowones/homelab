@@ -1,0 +1,56 @@
+---
+# Let the Pis trust the hub (Oracle) BEFORE their `tron` alias is pointed at it.
+# Their ssh uses the default StrictHostKeyChecking, so without this the first
+# scp/ssh to Oracle fails with "Host key verification failed".
+#
+# Oracle's host keys are read from Oracle itself over this play's authenticated
+# ssh connection (not scanned blindly), then added next to Tron's entry. Nothing
+# about Tron's entry or the Pis' `tron` alias changes here; that is the cutover.
+#
+#   ansible-playbook pis.yml --check --diff -K
+#   ansible-playbook pis.yml -K
+#
+# The last play prints the lines to paste into the low-ones container's known_hosts.
+- name: Read the hub's host keys
+  hosts: matrix_hub
+  gather_facts: false
+  tasks:
+    - name: Read Oracle's public host keys
+      ansible.builtin.slurp:
+        src: "/etc/ssh/ssh_host_{{ item }}_key.pub"
+      loop: [ed25519, ecdsa, rsa]
+      register: matrix_hub_host_pubkeys
+      failed_when: false
+      check_mode: false
+
+    - name: Keep the "type base64" part of each key
+      ansible.builtin.set_fact:
+        matrix_hub_hostkeys: >-
+          {{ matrix_hub_host_pubkeys.results
+             | rejectattr('content', 'undefined')
+             | map(attribute='content') | map('b64decode') | map('trim')
+             | map('regex_replace', '^(\\S+\\s+\\S+).*$', '\\1') | list }}
+
+    - name: Need at least one host key
+      ansible.builtin.assert:
+        that: matrix_hub_hostkeys | length > 0
+        quiet: true
+
+- name: Add the hub's host keys to the Pis
+  hosts: matrix_pis
+  gather_facts: false
+  tasks:
+    - name: Trust the hub's host keys
+      ansible.builtin.known_hosts:
+        name: "{{ matrix_hub_address }}"
+        key: "{{ matrix_hub_address }} {{ item }}"
+        state: present
+      loop: "{{ hostvars[groups['matrix_hub'][0]].matrix_hub_hostkeys }}"
+
+- name: Lines for the low-ones container
+  hosts: matrix_hub
+  gather_facts: false
+  tasks:
+    - name: Show the known_hosts lines to add in /matrix/container_ssh/known_hosts on low-ones
+      ansible.builtin.debug:
+        msg: "{{ matrix_hub_hostkeys | map('regex_replace', '^', '[172.17.0.1]:8675 ') | list }}"

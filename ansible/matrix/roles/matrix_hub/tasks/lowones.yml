@@ -1,0 +1,64 @@
+---
+# How the hub reaches the low-ones VPS: pin its host key, install the tunnel unit
+# (NOT enabled: only one host can hold port 8675, and Tron holds it until cutover).
+- name: Name under which known_hosts lists low-ones
+  ansible.builtin.set_fact:
+    matrix_hub_lowones_kh_name: "{{ matrix_lowones_host if matrix_lowones_port | int == 22 else '[' ~ matrix_lowones_host ~ ']:' ~ matrix_lowones_port }}"
+
+- name: Scan low-ones' ed25519 host key from the controller
+  ansible.builtin.command: "ssh-keyscan -t ed25519 -p {{ matrix_lowones_port }} {{ matrix_lowones_host }}"
+  delegate_to: localhost
+  become: false
+  register: matrix_hub_lowones_scan
+  changed_when: false
+  check_mode: false
+  failed_when: matrix_hub_lowones_scan.stdout | trim == ''
+
+- name: Fingerprint of the scanned key
+  ansible.builtin.command: ssh-keygen -lf -
+  args:
+    stdin: "{{ matrix_hub_lowones_scan.stdout }}"
+  delegate_to: localhost
+  become: false
+  register: matrix_hub_lowones_fp
+  changed_when: false
+  check_mode: false
+
+- name: Refuse to trust a low-ones key that does not match the pinned fingerprint
+  ansible.builtin.assert:
+    that: matrix_lowones_hostkey_fingerprint in matrix_hub_lowones_fp.stdout
+    fail_msg: "Scanned {{ matrix_hub_lowones_fp.stdout }}; expected {{ matrix_lowones_hostkey_fingerprint }}"
+    quiet: true
+
+- name: Trust low-ones' host key for the hub's ssh, rsync and tunnel
+  ansible.builtin.known_hosts:
+    name: "{{ matrix_hub_lowones_kh_name }}"
+    # ssh-keyscan prints "host:port" style names in its own format; rewrite to the known_hosts name
+    key: "{{ matrix_hub_lowones_kh_name }} {{ (matrix_hub_lowones_scan.stdout_lines | reject('match', '^#') | first).split(' ', 1)[1] }}"
+    state: present
+
+- name: Install the tunnel unit (not enabled)
+  ansible.builtin.template:
+    src: tunnel-lowones.service.j2
+    dest: /etc/systemd/system/tunnel-lowones.service
+    owner: root
+    group: root
+    mode: "0644"
+  become: true
+  notify: Reload systemd
+
+- name: Check that the hub can log in to low-ones with its own key
+  ansible.builtin.command: ssh -o BatchMode=yes {{ matrix_remote_server }} true
+  register: matrix_hub_lowones_login
+  changed_when: false
+  failed_when: false
+  when: matrix_hub_check_lowones | bool and not ansible_check_mode
+
+- name: Explain a failed low-ones login
+  ansible.builtin.assert:
+    that: matrix_hub_lowones_login.rc | default(0) == 0
+    fail_msg: >-
+      {{ inventory_hostname }} cannot log in to {{ matrix_remote_server }}. Authorize the hub's public key
+      (~/.ssh/{{ matrix_hub_ssh_key_name }}.pub, printed by the ssh tasks) on low-ones.
+    quiet: true
+  when: matrix_hub_check_lowones | bool and not ansible_check_mode

@@ -14,3 +14,12 @@ matrix_nodes: [cabin, driveway]
 matrix_remote_server: low-ones
 matrix_stale_duration: 5
 matrix_hc_base: https://hc-ping.com
+
+# The low-ones VPS, as the hub reaches it. The fingerprint is the ED25519 host key
+# (public information); the play fails if the scanned key does not match it.
+matrix_lowones_host: service.low-ones.com
+matrix_lowones_port: 7822
+matrix_lowones_hostkey_fingerprint: "SHA256:paXSB5ITzgYaU1YZI3SGojr97XV8a43Fl+CNmCmKbpA"
+
+# Where the Pis and the low-ones container reach the hub.
+matrix_hub_address: 192.168.0.240

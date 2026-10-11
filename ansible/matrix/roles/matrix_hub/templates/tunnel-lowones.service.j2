@@ -1,0 +1,22 @@
+# Managed by Ansible. Same as Tron's tunnel-lowones.service. Only ONE host can hold
+# port 8675 on low-ones (ExitOnForwardFailure): stop Tron's tunnel before starting this.
+[Unit]
+Description=Reverse SSH tunnel to low-ones (8675 -> local sshd)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User={{ matrix_user }}
+ExecStart=/usr/bin/ssh -NT \
+  -o ServerAliveInterval=30 \
+  -o ServerAliveCountMax=3 \
+  -o ExitOnForwardFailure=yes \
+  -o BatchMode=yes \
+  -R 127.0.0.1:8675:localhost:22 \
+  -R 172.17.0.1:8675:localhost:22 \
+  {{ matrix_remote_server }}
+Restart=always
+RestartSec=15
+
+[Install]
+WantedBy=multi-user.target
