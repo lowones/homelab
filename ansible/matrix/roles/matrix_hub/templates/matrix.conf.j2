@@ -3,3 +3,4 @@ MATRIX_NODES="{{ matrix_nodes | join(' ') }}"
 REMOTE_SERVER={{ matrix_remote_server }}
 STALE_DURATION={{ matrix_stale_duration }}
 HC_BASE={{ matrix_hc_base }}
+DRY_RUN={{ '1' if matrix_hub_dry_run else '0' }}

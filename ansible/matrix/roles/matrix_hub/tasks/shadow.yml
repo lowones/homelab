@@ -1,0 +1,105 @@
+---
+# Shadow run: the monitor runs here in dry-run mode on images pulled from Tron,
+# so its behaviour can be compared with the live hub. Nothing it does leaves this
+# host: no rsync or ssh to low-ones and no healthcheck pings. Skipped unless
+# matrix_hub_shadow is true.
+- name: Shadow run safety checks
+  when: matrix_hub_shadow | bool
+  block:
+    - name: Refuse to shadow-run unless dry-run mode is on
+      ansible.builtin.assert:
+        that: matrix_hub_dry_run | bool
+        fail_msg: matrix_hub_shadow needs matrix_hub_dry_run true. A live monitor here would compete with Tron.
+        quiet: true
+
+    - name: Look for matrix.env (the healthcheck UUIDs)
+      ansible.builtin.stat:
+        path: "{{ matrix_base }}/etc/matrix.env"
+      register: matrix_hub_env_stat
+      check_mode: false
+
+    - name: Refuse to shadow-run with healthcheck UUIDs present
+      ansible.builtin.assert:
+        that: not matrix_hub_env_stat.stat.exists
+        fail_msg: "{{ matrix_base }}/etc/matrix.env exists. The shadow run must not hold the healthcheck UUIDs; remove it."
+        quiet: true
+
+    - name: Scan Tron's ed25519 host key from the controller
+      ansible.builtin.command: "ssh-keyscan -t ed25519 {{ matrix_hub_shadow_host }}"
+      delegate_to: localhost
+      become: false
+      register: matrix_hub_tron_scan
+      changed_when: false
+      check_mode: false
+      failed_when: matrix_hub_tron_scan.stdout | trim == ''
+
+    - name: Fingerprint of the scanned key
+      ansible.builtin.command: ssh-keygen -lf -
+      args:
+        stdin: "{{ matrix_hub_tron_scan.stdout }}"
+      delegate_to: localhost
+      become: false
+      register: matrix_hub_tron_fp
+      changed_when: false
+      check_mode: false
+
+    - name: Check the fingerprint against the expected one, if given
+      ansible.builtin.assert:
+        that: matrix_hub_shadow_hostkey_fingerprint in matrix_hub_tron_fp.stdout
+        fail_msg: "Scanned key {{ matrix_hub_tron_fp.stdout }} does not match {{ matrix_hub_shadow_hostkey_fingerprint }}"
+        quiet: true
+      when: matrix_hub_shadow_hostkey_fingerprint | length > 0
+
+    - name: Show the fingerprint to compare with Tron
+      ansible.builtin.debug:
+        msg: "Tron host key as seen from the controller: {{ matrix_hub_tron_fp.stdout }}"
+
+    - name: Trust Tron's host key for the feed
+      ansible.builtin.known_hosts:
+        name: "{{ matrix_hub_shadow_host }}"
+        key: "{{ matrix_hub_tron_scan.stdout | trim }}"
+        state: present
+
+    - name: Install the feed script
+      ansible.builtin.template:
+        src: shadow-feed.sh.j2
+        dest: "{{ matrix_base }}/bin/shadow-feed.sh"
+        owner: "{{ matrix_user }}"
+        mode: "0755"
+
+    - name: Install the feed service and timer
+      ansible.builtin.template:
+        src: "{{ item }}.j2"
+        dest: "/etc/systemd/system/{{ item }}"
+        owner: root
+        group: root
+        mode: "0644"
+      loop: [matrix-shadow-feed.service, matrix-shadow-feed.timer]
+      become: true
+      notify: Reload systemd
+
+    - name: Make the new units visible to systemd
+      ansible.builtin.meta: flush_handlers
+
+    - name: Start the image feed
+      ansible.builtin.systemd:
+        name: matrix-shadow-feed.timer
+        enabled: true
+        state: started
+      become: true
+      when: not ansible_check_mode
+
+    - name: Wait for the first images to arrive from Tron
+      ansible.builtin.wait_for:
+        path: "{{ matrix_base }}/{{ item }}/{{ item }}.jpg"
+        timeout: 90
+      loop: "{{ matrix_nodes }}"
+      when: not ansible_check_mode
+
+    - name: Start the monitor (dry-run)
+      ansible.builtin.systemd:
+        name: matrix-monitor.service
+        enabled: true
+        state: started
+      become: true
+      when: not ansible_check_mode

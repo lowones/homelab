@@ -30,3 +30,20 @@ matrix_hub_ssh_hosts:
   - { alias: low-ones, hostname: service.low-ones.com, port: 7822 }
   - { alias: cabin, hostname: 192.168.0.232, port: 22 }
   - { alias: driveway, hostname: 192.168.0.233, port: 22 }
+  - { alias: tron, hostname: 192.168.0.2, port: 22 }
+
+# DRY_RUN=1 in matrix.conf: the monitor resizes and stashes but never rsyncs,
+# sshes or pings healthchecks. Leave true until cutover.
+matrix_hub_dry_run: true
+
+# Shadow run: start the monitor in dry-run mode and feed it images pulled
+# read-only from Tron, so it can be compared with the live hub before cutover.
+# Needs the restricted key on Tron (see README) and matrix_hub_dry_run: true.
+matrix_hub_shadow: false
+matrix_hub_shadow_host: 192.168.0.2
+matrix_hub_shadow_alias: tron
+matrix_hub_shadow_interval: 10s
+# Optional: expected Tron ed25519 host key fingerprint ("SHA256:..."). If set,
+# the play fails when the scanned key does not match. Get it on Tron with:
+#   ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub
+matrix_hub_shadow_hostkey_fingerprint: ""

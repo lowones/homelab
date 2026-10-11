@@ -40,6 +40,8 @@
     # files added to bin/ later (lowlib.py, __pycache__) bump the directory's mtime,
     # which would otherwise show as a change on every following run.
     rsync_opts: "{{ matrix_hub_sync_excludes | map('regex_replace', '^', '--exclude=') | list + ['--chmod=D2775', '--omit-dir-times'] }}"
+  # new code only takes effect on a monitor that is meant to be running
+  notify: Restart matrix monitor
   loop: "{{ matrix_hub_sync_dirs }}"
   when: matrix_hub_rsync_stat.stat.exists or not ansible_check_mode
 
@@ -56,5 +58,6 @@
     dest: "{{ matrix_base }}/etc/matrix.conf"
     owner: "{{ matrix_user }}"
     mode: "0644"
+  notify: Restart matrix monitor
 
 # matrix.env (the healthcheck UUIDs) is deliberately NOT deployed in this phase.

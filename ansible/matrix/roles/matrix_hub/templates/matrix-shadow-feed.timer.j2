@@ -1,0 +1,11 @@
+# Managed by Ansible
+[Unit]
+Description=Run the matrix shadow image feed
+
+[Timer]
+OnBootSec=30s
+OnUnitInactiveSec={{ matrix_hub_shadow_interval }}
+AccuracySec=1s
+
+[Install]
+WantedBy=timers.target

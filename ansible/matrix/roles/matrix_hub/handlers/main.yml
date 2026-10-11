@@ -3,3 +3,12 @@
   ansible.builtin.systemd:
     daemon_reload: true
   become: true
+
+# Only restarts a monitor that is meant to be running (shadow run). Outside the
+# shadow run the unit is installed but stopped, and must stay that way.
+- name: Restart matrix monitor
+  ansible.builtin.systemd:
+    name: matrix-monitor.service
+    state: restarted
+  become: true
+  when: matrix_hub_shadow | bool and not ansible_check_mode

@@ -1,0 +1,10 @@
+# Managed by Ansible
+[Unit]
+Description=Pull camera images from Tron for the matrix shadow run (read-only)
+After=network-online.target
+
+[Service]
+Type=oneshot
+User={{ matrix_user }}
+Group={{ matrix_group }}
+ExecStart={{ matrix_base }}/bin/shadow-feed.sh

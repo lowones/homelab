@@ -48,21 +48,43 @@
   changed_when: false
   when: not ansible_check_mode
 
-- name: Check that no matrix service is running yet
+# Outside the shadow run nothing may be running: two hubs must not push to
+# low-ones. During it only the dry-run monitor and the image feed may run, and
+# the tunnel to low-ones must stay down.
+- name: Check which matrix services are running
   ansible.builtin.command: "systemctl is-active {{ item }}"  # noqa: command-instead-of-module
-  loop: [matrix-monitor.service, tunnel-lowones.service]
+  loop: "{{ ['tunnel-lowones.service'] if matrix_hub_shadow | bool else ['matrix-monitor.service', 'tunnel-lowones.service'] }}"
   register: matrix_hub_active
   changed_when: false
   failed_when: false
   check_mode: false
 
-- name: Assert nothing is running
+- name: Assert nothing that could reach low-ones is running
   ansible.builtin.assert:
     that: matrix_hub_active.results | selectattr('stdout', 'equalto', 'active') | list | length == 0
     fail_msg: >-
-      A matrix service is already active on {{ inventory_hostname }}. This phase
-      must not run alongside Tron. Stop it first.
+      A matrix service is already active on {{ inventory_hostname }}. This must not
+      run alongside Tron outside the dry-run shadow run. Stop it first
+      (sudo systemctl disable --now matrix-monitor matrix-shadow-feed.timer).
     quiet: true
+
+- name: Verify the shadow run
+  when: matrix_hub_shadow | bool and not ansible_check_mode
+  block:
+    - name: Confirm dry-run mode is set in matrix.conf
+      ansible.builtin.command: "grep -qx 'DRY_RUN=1' {{ matrix_base }}/etc/matrix.conf"  # noqa: command-instead-of-shell
+      changed_when: false
+
+    - name: Check the monitor and the feed timer are active
+      ansible.builtin.command: "systemctl is-active {{ item }}"  # noqa: command-instead-of-module
+      loop: [matrix-monitor.service, matrix-shadow-feed.timer]
+      changed_when: false
+
+    - name: Last lines of the monitor log
+      ansible.builtin.command: journalctl -u matrix-monitor.service -n 12 --no-pager -o cat
+      become: true
+      register: matrix_hub_shadow_log
+      changed_when: false
 
 - name: Report
   ansible.builtin.debug:
@@ -70,4 +92,11 @@
       - "python / lowlib: {{ matrix_hub_lowlib.stdout | default('skipped in check mode') }}"
       - "convert: {{ (matrix_hub_convert_final.stdout_lines | default(['skipped in check mode']))[0] }}"
       - "rsync: {{ (matrix_hub_rsync.stdout_lines | default(['skipped in check mode']))[0] }}"
-      - "matrix services active: none (monitor and tunnel are installed but stopped)"
+      - >-
+        matrix services:
+        {{ 'shadow run: dry-run monitor + image feed from Tron active, tunnel stopped'
+        if matrix_hub_shadow | bool else 'none (monitor and tunnel are installed but stopped)' }}
+      - >-
+        monitor log:
+        {{ (matrix_hub_shadow_log.stdout_lines | default([]) | join(' | '))
+        if matrix_hub_shadow | bool and not ansible_check_mode else 'n/a' }}
