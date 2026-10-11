@@ -48,9 +48,11 @@
   changed_when: false
   when: not ansible_check_mode
 
-# Outside the shadow run nothing may be running: two hubs must not push to
-# low-ones. During it only the dry-run monitor and the image feed may run, and
-# the tunnel to low-ones must stay down.
+# While dry_run is on, nothing that could reach low-ones may be running, so two
+# hubs never push at once. During the shadow run only the dry-run monitor and the
+# image feed may run, and the tunnel must stay down. Once the hub is live
+# (matrix_hub_dry_run false) the monitor and tunnel are expected to be running, so
+# this only reports their state; stopping Tron first is a manual cutover step.
 - name: Check which matrix services are running
   ansible.builtin.command: "systemctl is-active {{ item }}"  # noqa: command-instead-of-module
   loop: "{{ ['tunnel-lowones.service'] if matrix_hub_shadow | bool else ['matrix-monitor.service', 'tunnel-lowones.service'] }}"
@@ -67,6 +69,7 @@
       run alongside Tron outside the dry-run shadow run. Stop it first
       (sudo systemctl disable --now matrix-monitor matrix-shadow-feed.timer).
     quiet: true
+  when: matrix_hub_dry_run | bool
 
 - name: Verify the shadow run
   when: matrix_hub_shadow | bool and not ansible_check_mode
@@ -100,8 +103,11 @@
       - "rsync: {{ (matrix_hub_rsync.stdout_lines | default(['skipped in check mode']))[0] }}"
       - >-
         matrix services:
-        {{ 'shadow run: dry-run monitor + image feed from Tron active, tunnel stopped'
-        if matrix_hub_shadow | bool else 'none (monitor and tunnel are installed but stopped)' }}
+        {{ 'LIVE hub: ' ~ (matrix_hub_active.results | map(attribute='item')
+        | zip(matrix_hub_active.results | map(attribute='stdout')) | map('join', '=') | join(', '))
+        if not (matrix_hub_dry_run | bool)
+        else ('shadow run: dry-run monitor + image feed from Tron active, tunnel stopped'
+        if matrix_hub_shadow | bool else 'none (monitor and tunnel are installed but stopped)') }}
       - >-
         monitor log:
         {{ (matrix_hub_shadow_log.stdout_lines | default([]) | join(' | '))

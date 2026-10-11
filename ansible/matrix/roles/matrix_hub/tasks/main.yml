@@ -11,6 +11,8 @@
   ansible.builtin.import_tasks: ssh.yml
 - name: Low-ones trust and the tunnel unit (installed, not enabled)
   ansible.builtin.import_tasks: lowones.yml
+- name: Live-hub checks (matrix.env), only when matrix_hub_dry_run is false
+  ansible.builtin.import_tasks: live.yml
 - name: Shadow run (dry-run monitor fed from Tron), only when matrix_hub_shadow is true
   ansible.builtin.import_tasks: shadow.yml
 - name: Verify

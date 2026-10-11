@@ -1,0 +1,44 @@
+---
+# Only when matrix_hub_dry_run is false (cutover and after): the monitor will
+# ping healthchecks, so matrix.env has to exist and be private. The UUIDs are
+# never read into Ansible or printed; only their presence is counted.
+- name: Live-hub safety checks
+  when: not (matrix_hub_dry_run | bool)
+  block:
+    - name: Look for matrix.env (the healthcheck UUIDs)
+      ansible.builtin.stat:
+        path: "{{ matrix_base }}/etc/matrix.env"
+      register: matrix_hub_live_env
+      check_mode: false
+
+    - name: Refuse to go live without a private matrix.env
+      ansible.builtin.assert:
+        that:
+          - matrix_hub_live_env.stat.exists
+          - matrix_hub_live_env.stat.mode == '0600'
+          - matrix_hub_live_env.stat.pw_name == matrix_user
+        fail_msg: >-
+          {{ matrix_base }}/etc/matrix.env must exist, owned by {{ matrix_user }}, mode 0600
+          (HC_UUID_CABIN=... and HC_UUID_DRIVEWAY=..., created by hand; see README, Cutover).
+        quiet: true
+
+    - name: Count the healthcheck UUID lines (values are not shown)
+      ansible.builtin.command: "grep -c '^HC_UUID_.*=.' {{ matrix_base }}/etc/matrix.env"  # noqa: command-instead-of-shell
+      register: matrix_hub_live_uuids
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: Need one non-empty UUID line per camera
+      ansible.builtin.assert:
+        that: matrix_hub_live_uuids.stdout | trim | int >= matrix_nodes | length
+        fail_msg: "{{ matrix_base }}/etc/matrix.env needs an HC_UUID_<NODE>=... line for each of: {{ matrix_nodes | join(', ') }}"
+        quiet: true
+
+    # A string such as "false" passed with -e is truthy in a template; make sure the
+    # file the monitor will read really says live, or it would silently stay in dry-run.
+    - name: Confirm matrix.conf says DRY_RUN=0
+      ansible.builtin.command: "grep -qx 'DRY_RUN=0' {{ matrix_base }}/etc/matrix.conf"  # noqa: command-instead-of-shell
+      changed_when: false
+      check_mode: false
+      when: not ansible_check_mode

@@ -1,0 +1,68 @@
+---
+# Point the camera Pis at a hub: change the HostName of their `Host tron` alias in
+# ~/.ssh/config (the Pis' scripts scp and ssh to `tron`). Nothing else changes.
+#
+# Default target is the hub (matrix_hub_address, Oracle). To roll back to Tron:
+#   -e matrix_cutover_target=192.168.0.2
+#
+#   ansible-playbook cutover.yml --check --diff -K -e matrix_cutover_confirm=yes
+#   ansible-playbook cutover.yml -K -e matrix_cutover_confirm=yes
+#
+# Before it changes anything, each Pi proves it can scp and ssh to the target with
+# its own `tron` alias settings (user, key), writing and deleting a test file in its
+# own camera directory there. The old ~/.ssh/config is kept next to it (config.<pid>.<date>~).
+# See the README, section Cutover, for where this fits.
+- name: Point the Pis' `tron` alias at the hub
+  hosts: matrix_pis
+  gather_facts: false
+  vars:
+    matrix_cutover_target: "{{ matrix_hub_address }}"
+    matrix_cutover_test_file: "{{ matrix_base }}/{{ inventory_hostname }}/.cutover-test"
+  tasks:
+    - name: Require explicit confirmation
+      ansible.builtin.assert:
+        that: matrix_cutover_confirm | default('') == 'yes'
+        fail_msg: Pass -e matrix_cutover_confirm=yes. This changes where the cameras send their images.
+        quiet: true
+
+    # These are read-only checks apart from one tiny test file that is removed again,
+    # so they also run under --check.
+    - name: Prove the Pi can scp to the target with its `tron` alias settings
+      ansible.builtin.shell:
+        executable: /bin/bash
+        cmd: |
+          set -e
+          o="-o BatchMode=yes -o ConnectTimeout=10 -o HostName={{ matrix_cutover_target }}"
+          t=$(mktemp)
+          echo cutover-test > "$t"
+          scp -q $o "$t" tron:{{ matrix_cutover_test_file }}
+          ssh $o tron "test -s {{ matrix_cutover_test_file }} && rm -f {{ matrix_cutover_test_file }}"
+          rm -f "$t"
+          echo ok
+      register: matrix_cutover_probe
+      changed_when: false
+      check_mode: false
+
+    - name: Flip the alias (old file kept)
+      ansible.builtin.replace:
+        path: ~/.ssh/config
+        regexp: '(?m)^(Host tron[ \t]*\n[ \t]+[Hh]ost[Nn]ame[ \t]+)\S+([ \t]*)$'
+        replace: '\g<1>{{ matrix_cutover_target }}\g<2>'
+        backup: true
+
+    - name: Ask ssh which host `tron` resolves to now
+      ansible.builtin.shell:
+        executable: /bin/bash
+        cmd: set -o pipefail; ssh -G tron | awk '$1 == "hostname" {print $2}'
+      register: matrix_cutover_resolved
+      changed_when: false
+      check_mode: false
+
+    - name: Assert it is the target (skipped under --check, where nothing was written)
+      ansible.builtin.assert:
+        that: matrix_cutover_resolved.stdout | trim == matrix_cutover_target
+        fail_msg: >-
+          `ssh -G tron` says {{ matrix_cutover_resolved.stdout | trim }}, expected
+          {{ matrix_cutover_target }}. Check ~/.ssh/config on {{ inventory_hostname }}.
+        quiet: true
+      when: not ansible_check_mode
