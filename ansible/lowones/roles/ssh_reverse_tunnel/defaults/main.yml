@@ -1,0 +1,8 @@
+---
+rvtunnel_user: rvtunnel
+rvtunnel_home: /var/lib/rvtunnel
+rvtunnel_key: "{{ rvtunnel_home }}/id_ed25519"
+rvtunnel_conf_dir: /etc/rvtunnel
+rvtunnel_known_hosts: "{{ rvtunnel_conf_dir }}/known_hosts"   # root-owned: the tunnel user cannot alter the pin
+rvtunnel_service: rvtunnel-lowones
+rvtunnel_enable: true

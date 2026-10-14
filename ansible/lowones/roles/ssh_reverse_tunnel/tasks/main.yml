@@ -1,0 +1,92 @@
+---
+- name: Tunnel user (adopts the one created by hand during bootstrap)
+  ansible.builtin.user:
+    name: "{{ rvtunnel_user }}"
+    system: true
+    home: "{{ rvtunnel_home }}"
+    create_home: true
+    shell: /usr/sbin/nologin
+
+- name: Tunnel key (generated once, on the Pi; never leaves it)
+  community.crypto.openssh_keypair:
+    path: "{{ rvtunnel_key }}"
+    type: ed25519
+    comment: "{{ rvtunnel_user }}@{{ inventory_hostname }}"
+    owner: "{{ rvtunnel_user }}"
+    group: "{{ rvtunnel_user }}"
+    mode: "0600"
+  register: rvtunnel_keypair
+
+- name: The Pi's key must be the one authorized on the VPS
+  ansible.builtin.assert:
+    that: (rvtunnel_keypair.public_key | split)[0:2] == (rvtunnel_pubkey | split)[0:2]
+    fail_msg: >-
+      The key on this Pi differs from rvtunnel_pubkey in group_vars/all.yml, so the VPS will refuse it.
+      Update the var and re-run vps-tunnel-keys.yml.
+    quiet: true
+
+- name: Config directory (root-owned)
+  ansible.builtin.file:
+    path: "{{ rvtunnel_conf_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Scan low-ones' ed25519 host key from the controller
+  ansible.builtin.command: "ssh-keyscan -t ed25519 -p {{ lowones_port }} {{ lowones_host }}"
+  delegate_to: localhost
+  become: false
+  register: rvtunnel_scan
+  changed_when: false
+  check_mode: false
+  failed_when: rvtunnel_scan.stdout | trim == ''
+
+- name: Fingerprint of the scanned key
+  ansible.builtin.command: ssh-keygen -lf -
+  args:
+    stdin: "{{ rvtunnel_scan.stdout }}"
+  delegate_to: localhost
+  become: false
+  register: rvtunnel_fp
+  changed_when: false
+  check_mode: false
+
+- name: Refuse to pin a key that does not match the verified fingerprint
+  ansible.builtin.assert:
+    that: lowones_hostkey_fingerprint in rvtunnel_fp.stdout
+    fail_msg: "Scanned {{ rvtunnel_fp.stdout }}; expected {{ lowones_hostkey_fingerprint }}"
+    quiet: true
+
+- name: Pin the VPS host key for the tunnel (StrictHostKeyChecking=yes)
+  ansible.builtin.copy:
+    content: "{{ (rvtunnel_scan.stdout_lines | reject('match', '^#') | first) }}\n"
+    dest: "{{ rvtunnel_known_hosts }}"
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Tunnel unit
+  ansible.builtin.template:
+    src: rvtunnel.service.j2
+    dest: "/etc/systemd/system/{{ rvtunnel_service }}.service"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Reload systemd
+  register: rvtunnel_unit
+
+- name: Apply daemon-reload now so enabling below sees the unit
+  ansible.builtin.meta: flush_handlers
+
+- name: Enable the tunnel at boot (never restarts it)
+  ansible.builtin.systemd:
+    name: "{{ rvtunnel_service }}"
+    enabled: "{{ rvtunnel_enable }}"
+
+- name: Tell the operator if a restart is pending
+  ansible.builtin.debug:
+    msg: >-
+      Unit file changed. Restart over Tailscale, not through the tunnel:
+      sudo systemctl restart {{ rvtunnel_service }}
+  when: rvtunnel_unit is changed

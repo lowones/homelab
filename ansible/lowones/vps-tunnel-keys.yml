@@ -1,0 +1,58 @@
+---
+# Authorize the RV Pi's tunnel key on low-ones. Touches ONLY ~sshtunnel/.ssh/authorized_keys
+# (non-exclusive: tron's and oracle's keys are left exactly as they are). Does not touch sshd.
+#
+#   ansible-playbook vps-tunnel-keys.yml --check --diff -K
+#   ansible-playbook vps-tunnel-keys.yml -K
+#
+# Run this BEFORE the Pi's tunnel service is enabled: fail2ban's sshd jail is active on the VPS.
+- name: Authorize the RV Pi tunnel key on low-ones
+  hosts: vps
+  gather_facts: false
+  tasks:
+    - name: Scan low-ones' ed25519 host key from the controller
+      ansible.builtin.command: "ssh-keyscan -t ed25519 -p {{ lowones_port }} {{ lowones_host }}"
+      delegate_to: localhost
+      become: false
+      register: lowones_scan
+      changed_when: false
+      check_mode: false
+      failed_when: lowones_scan.stdout | trim == ''
+
+    - name: Fingerprint of the scanned key
+      ansible.builtin.command: ssh-keygen -lf -
+      args:
+        stdin: "{{ lowones_scan.stdout }}"
+      delegate_to: localhost
+      become: false
+      register: lowones_fp
+      changed_when: false
+      check_mode: false
+
+    - name: Refuse to trust a key that does not match the pinned fingerprint
+      ansible.builtin.assert:
+        that: lowones_hostkey_fingerprint in lowones_fp.stdout
+        fail_msg: "Scanned {{ lowones_fp.stdout }}; expected {{ lowones_hostkey_fingerprint }}"
+        quiet: true
+
+    - name: Trust the verified key for this controller's ssh
+      ansible.builtin.known_hosts:
+        name: "[{{ lowones_host }}]:{{ lowones_port }}"
+        key: "[{{ lowones_host }}]:{{ lowones_port }} {{ (lowones_scan.stdout_lines | reject('match', '^#') | first).split(' ', 1)[1] }}"
+        state: present
+      delegate_to: localhost
+      become: false
+
+    - name: Authorize the Pi's key (one loopback port, no shell, no other forwarding)
+      ansible.posix.authorized_key:
+        user: "{{ lowones_tunnel_user }}"
+        key: "{{ rvtunnel_pubkey }}"
+        # permitopen blocks -L: without it a stolen key could use the VPS as a TCP pivot to its own
+        # loopback (tron/oracle sshd on 8675/8676, caddy admin, docker). authorized_keys has no
+        # "none" keyword (sshd rejects the whole line), so point it at 192.0.2.1 (RFC 5737 TEST-NET-1,
+        # never routable): the only -L destination left reaches nothing.
+        key_options: 'restrict,port-forwarding,permitopen="192.0.2.1:1",permitlisten="localhost:{{ rvtunnel_remote_port }}"'
+        exclusive: false
+        manage_dir: false
+        state: present
+      become: true

@@ -1,0 +1,14 @@
+---
+# Converge the RV Pi's reverse tunnel. Run from batcomputer once the tunnel is up
+# (the connection to the Pi goes THROUGH the tunnel, see inventory.ini).
+#
+#   ansible-playbook pi-tunnel.yml --check --diff
+#   ansible-playbook pi-tunnel.yml
+#
+# This role never restarts the tunnel service (that would cut its own connection).
+# If the unit file changed, restart it over Tailscale: sudo systemctl restart rvtunnel-lowones
+- name: RV Pi reverse tunnel to low-ones
+  hosts: rv
+  become: true
+  roles:
+    - ssh_reverse_tunnel

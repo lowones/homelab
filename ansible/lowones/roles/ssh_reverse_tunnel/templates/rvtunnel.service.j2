@@ -1,0 +1,28 @@
+# Managed by Ansible (ansible/lowones, role ssh_reverse_tunnel). Do not hand-edit.
+[Unit]
+Description=Reverse SSH tunnel to low-ones (localhost:{{ rvtunnel_remote_port }} -> local sshd)
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User={{ rvtunnel_user }}
+NoNewPrivileges=yes
+PrivateTmp=yes
+ExecStart=/usr/bin/ssh -NT \
+  -o ServerAliveInterval=30 \
+  -o ServerAliveCountMax=3 \
+  -o ExitOnForwardFailure=yes \
+  -o BatchMode=yes \
+  -o IdentitiesOnly=yes \
+  -o StrictHostKeyChecking=yes \
+  -o UserKnownHostsFile={{ rvtunnel_known_hosts }} \
+  -i {{ rvtunnel_key }} \
+  -R localhost:{{ rvtunnel_remote_port }}:localhost:22 \
+  -p {{ lowones_port }} {{ lowones_tunnel_user }}@{{ lowones_host }}
+Restart=always
+RestartSec=60
+
+[Install]
+WantedBy=multi-user.target

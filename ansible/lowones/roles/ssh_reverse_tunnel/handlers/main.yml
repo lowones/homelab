@@ -1,0 +1,6 @@
+---
+# Deliberately NO restart handler: restarting the tunnel while Ansible is connected through it
+# would kill the run's own connection. daemon-reload is safe.
+- name: Reload systemd
+  ansible.builtin.systemd:
+    daemon_reload: true
