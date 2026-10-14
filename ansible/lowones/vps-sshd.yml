@@ -1,0 +1,71 @@
+---
+# Make dead tunnel sessions free their ports on the VPS.
+#
+# Problem: when a reverse-tunnel client vanishes (Starlink blip, reboot) the VPS never notices, because
+# ClientAliveInterval is 0. The stale sshd session keeps holding 127.0.0.1:<port>, every reconnect fails with
+# "remote port forwarding failed" (ExitOnForwardFailure=yes) and the tunnel stays down until someone kills
+# the stale session by hand.
+#
+# Fix: probe clients every 30s and drop them after 3 missed replies (~90s). Live sessions answer
+# automatically, so only dead ones are cut. Helps tron's and oracle's tunnels too.
+#
+#   ansible-playbook vps-sshd.yml --check --diff -K
+#   ansible-playbook vps-sshd.yml -K
+#
+# Reloads sshd (never restarts), so existing sessions, including this one, survive.
+# The "10-" prefix matters: sshd uses the FIRST value it sees and 50-redhat.conf sorts later.
+- name: Keepalive drop-in for sshd on low-ones
+  hosts: vps
+  gather_facts: false
+  become: true
+  vars:
+    sshd_dropin: /etc/ssh/sshd_config.d/10-keepalive.conf
+  tasks:
+    - name: Apply the drop-in, validate the whole config, back out on failure
+      block:
+        - name: Keepalive drop-in
+          ansible.builtin.copy:
+            dest: "{{ sshd_dropin }}"
+            owner: root
+            group: root
+            mode: "0644"
+            content: |
+              # Managed by Ansible (ansible/lowones/vps-sshd.yml). Do not hand-edit.
+              # Drop dead clients so a vanished reverse tunnel frees its port (~90s).
+              ClientAliveInterval 30
+              ClientAliveCountMax 3
+          register: sshd_keepalive
+
+        - name: Validate the complete sshd config (including this drop-in)
+          ansible.builtin.command: /usr/sbin/sshd -t
+          changed_when: false
+          check_mode: false
+
+        - name: Reload sshd (keeps existing sessions)
+          ansible.builtin.systemd:
+            name: sshd
+            state: reloaded
+          when: sshd_keepalive is changed
+
+      rescue:
+        - name: Validation failed, remove the drop-in so a later reload cannot break sshd
+          ansible.builtin.file:
+            path: "{{ sshd_dropin }}"
+            state: absent
+          when: not ansible_check_mode
+
+        - name: Stop here
+          ansible.builtin.fail:
+            msg: "sshd -t rejected the config; the drop-in was removed and sshd was not reloaded."
+
+    - name: Effective values (should be 30 / 3)
+      ansible.builtin.shell: set -o pipefail; /usr/sbin/sshd -T | grep -E '^clientalive'
+      args:
+        executable: /bin/bash
+      register: sshd_effective
+      changed_when: false
+      check_mode: false
+
+    - name: Show them
+      ansible.builtin.debug:
+        var: sshd_effective.stdout_lines

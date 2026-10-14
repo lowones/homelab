@@ -1,0 +1,65 @@
+---
+# Alarm if the RV Pi's tunnel is down, via Healthchecks.io.
+#
+# Checking that port 8677 is open is NOT enough: a stale session holds the port while the tunnel is dead.
+# So the check reads the SSH banner THROUGH the tunnel. Only the Pi's sshd can answer that.
+#
+# The ping URL is not stored in the repo. Create a check in Healthchecks.io (period 1 min, grace ~10 min)
+# and pass its ping URL at run time:
+#
+#   ansible-playbook vps-tunnel-health.yml --check --diff -K -e rvtunnel_hc_url=https://hc-ping.com/<uuid>
+#   ansible-playbook vps-tunnel-health.yml -K -e rvtunnel_hc_url=https://hc-ping.com/<uuid>
+#
+# (Later: move it into Vault with the other secrets.)
+- name: Tunnel health check (VPS cron -> Healthchecks.io)
+  hosts: vps
+  gather_facts: false
+  become: true
+  vars:
+    rvtunnel_check_port: "{{ rvtunnel_remote_port }}"
+  tasks:
+    - name: A ping URL is required
+      ansible.builtin.assert:
+        that: rvtunnel_hc_url is defined and rvtunnel_hc_url.startswith('https://')
+        fail_msg: "Pass -e rvtunnel_hc_url=https://hc-ping.com/<uuid>"
+        quiet: true
+
+    - name: Ping URL (root only)
+      ansible.builtin.copy:
+        dest: /etc/rvtunnel-health.conf
+        owner: root
+        group: root
+        mode: "0600"
+        content: |
+          HC_URL={{ rvtunnel_hc_url }}
+      no_log: true
+
+    - name: Check script
+      ansible.builtin.copy:
+        dest: /usr/local/bin/rvtunnel-check
+        owner: root
+        group: root
+        mode: "0755"
+        content: |
+          #!/bin/bash
+          # Managed by Ansible (ansible/lowones/vps-tunnel-health.yml). Do not hand-edit.
+          # Reads the SSH banner through the reverse tunnel; pings Healthchecks.io on success, /fail otherwise.
+          set -u
+          . /etc/rvtunnel-health.conf
+          PORT={{ rvtunnel_check_port }}
+          banner=$(timeout 5 bash -c "exec 3<>/dev/tcp/127.0.0.1/$PORT && head -c 4 <&3" 2>/dev/null)
+          if [ "$banner" = "SSH-" ]; then
+            curl -fsS -m 10 --retry 2 -o /dev/null "$HC_URL"
+          else
+            curl -fsS -m 10 --retry 2 -o /dev/null "$HC_URL/fail"
+          fi
+
+    - name: Run it every minute
+      ansible.builtin.copy:
+        dest: /etc/cron.d/rvtunnel-check
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          # Managed by Ansible (ansible/lowones/vps-tunnel-health.yml).
+          * * * * * root /usr/local/bin/rvtunnel-check
