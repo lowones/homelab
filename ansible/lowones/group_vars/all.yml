@@ -8,4 +8,4 @@ lowones_tunnel_user: sshtunnel                                                  
 # RV Pi tunnel. Ports in use on the VPS: 8675 tron, 8676 oracle, 8677 this Pi.
 rvtunnel_remote_port: 8677
 # PUBLIC half only. The private key never leaves the Pi.
-rvtunnel_pubkey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKo2X00/0BO+wGgeEdxbrDkYdgbQMPuerjpP++Xnzz1m rvtunnel@zero"
+rvtunnel_pubkey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEqCBoF14W4EmG+OhnRCeO61JwNwAxkVQn4itLWyJdA7 rvtunnel@mini"
