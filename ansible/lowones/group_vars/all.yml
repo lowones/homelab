@@ -5,7 +5,7 @@ lowones_port: 7822
 lowones_hostkey_fingerprint: "SHA256:paXSB5ITzgYaU1YZI3SGojr97XV8a43Fl+CNmCmKbpA"   # ed25519, verified on the VPS itself
 lowones_tunnel_user: sshtunnel                                                      # shell /bin/true, tunnels only
 
-# RV Pi tunnel. Ports in use on the VPS: 8675 tron, 8676 oracle, 8677 this Pi.
+# RV tunnel host (Mac mini since 2026-10-15; was the Pi). Ports in use on the VPS: 8675 tron, 8676 oracle, 8677 mini.
 rvtunnel_remote_port: 8677
-# PUBLIC half only. The private key never leaves the Pi.
+# PUBLIC half only. The private key never leaves the tunnel host (Mac: /var/db/rvtunnel/id_ed25519).
 rvtunnel_pubkey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEqCBoF14W4EmG+OhnRCeO61JwNwAxkVQn4itLWyJdA7 rvtunnel@mini"

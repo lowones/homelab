@@ -1,22 +1,22 @@
 ---
 # batcomputer's Ansible key on the VPS is `restrict,pty` (no forwarding), so ProxyJump through the
-# VPS to the RV Pi's tunnel port is refused ("administratively prohibited"). Extend THAT ONE key so it
-# may forward to the Pi's tunnel port and nothing else. Other keys and the sshd config are untouched.
+# VPS to the RV tunnel port is refused ("administratively prohibited"). Extend THAT ONE key so it
+# may forward to the tunnel port and nothing else. Other keys and the sshd config are untouched.
 # `lowone` already has sudo and a shell on the VPS, so this adds no real capability, it only lets
 # the existing access be used as a jump host.
 #
 #   ansible-playbook vps-admin-keys.yml --check --diff -K
 #   ansible-playbook vps-admin-keys.yml -K
-- name: Let batcomputer's Ansible key jump through the VPS to the RV Pi tunnel port
+- name: Let batcomputer's Ansible key jump through the VPS to the RV tunnel port
   hosts: vps
   gather_facts: false
   tasks:
-    - name: Authorize batcomputer's key (forwarding only to the Pi's tunnel port)
+    - name: Authorize batcomputer's key (forwarding only to the tunnel port)
       ansible.posix.authorized_key:
         user: "{{ ansible_user }}"
         key: "{{ lookup('file', '~/.ssh/id_ed25519.pub') }}"
         comment: batcomputer-ansible
-        # `port-forwarding` re-enables BOTH -L and -R. permitopen limits -L to the Pi's tunnel port;
+        # `port-forwarding` re-enables BOTH -L and -R. permitopen limits -L to the tunnel port;
         # permitlisten points -R at an unroutable RFC 5737 address so the key still cannot open
         # listeners on the VPS (the key had none before; authorized_keys has no "none" keyword).
         key_options: 'restrict,pty,port-forwarding,permitopen="localhost:{{ rvtunnel_remote_port }}",permitlisten="192.0.2.1:1"'

@@ -1,31 +1,66 @@
-# low-ones VPS + RV Pi tunnel (Ansible)
+# low-ones VPS + RV tunnel (Ansible)
 
-Manages the RV Pi (`zero`, standalone, not part of matrix) reverse tunnel to the low-ones VPS, and the
-VPS-side key that allows it. First step toward putting the hand-edited VPS under Ansible.
+Manages the RV reverse tunnel to the low-ones VPS, and the VPS-side key that allows it. First step toward
+putting the hand-edited VPS under Ansible.
 
-Ports on the VPS: **8675** tron, **8676** oracle, **8677** zero. Only 8677 is managed here;
+**Current tunnel host: the Mac mini (`mini`, hostname `neverland`, standalone, not part of matrix), since
+2026-10-15.** It runs the tunnel as a launchd daemon (see "Mac mini (current)"). The Pi (`zero`) was the
+tunnel host before that (its SD card cracked); its systemd role and bootstrap are kept below as legacy.
+
+Ports on the VPS: **8675** tron, **8676** oracle, **8677** mini (was zero). Only 8677 is managed here;
 tron's and oracle's hand-made tunnels are untouched (the matrix cutover is in flight).
 
 | File | What it does |
 |---|---|
-| `vps-tunnel-keys.yml` | Adds the Pi's key to `~sshtunnel/.ssh/authorized_keys` on the VPS. Non-exclusive. Does not touch sshd. |
-| `pi-tunnel.yml` + `roles/ssh_reverse_tunnel` | Pi side: tunnel user, key check, pinned VPS host key, systemd unit. Never restarts the tunnel. |
+| `vps-tunnel-keys.yml` | Adds the tunnel host's key (`rvtunnel_pubkey`) to `~sshtunnel/.ssh/authorized_keys` on the VPS. Non-exclusive: it never removes an old key, so remove a replaced host's line by hand. Does not touch sshd. |
+| `bootstrap-mac.sh` | Mac mini side, run on the Mac with `sudo bash`. Idempotent. Creates the `_rvtunnel` user, key, pinned VPS host key and the launchd plist (written, not loaded), and sets pmset. Prints the public key to authorize. |
+| `harden-sshd-mac.sh` | Mac mini sshd lockdown, run with `sudo bash` after the Mac's `authorized_keys` has your keys: key-only, `AllowUsers`, no forwarding. |
+| `pi-tunnel.yml` + `roles/ssh_reverse_tunnel` | Legacy Pi side: tunnel user, key check, pinned VPS host key, systemd unit. Never restarts the tunnel. |
 | `vps-sshd.yml` | sshd drop-in `10-keepalive.conf` (ClientAlive 30s x3) so a vanished tunnel's stale session frees its port in ~90s. Validated with `sshd -t`, reload only. |
 | `vps-tunnel-health.yml` | VPS cron (1/min) reads the SSH banner through port 8677 and pings Healthchecks.io (`/fail` if silent). Ping URL passed with `-e`, not stored in the repo. |
-| `bootstrap-pi.sh` | One-time hand bootstrap of the Pi (pin + unit, not enabled), used before Ansible can reach the Pi. |
+| `bootstrap-pi.sh` | Legacy: one-time hand bootstrap of the Pi (pin + unit, not enabled), used before Ansible can reach the Pi. |
 
 ## Security model
 
-The Pi's key line on the VPS is `restrict,port-forwarding,permitopen="192.0.2.1:1",permitlisten="localhost:8677"`:
+The tunnel key's line on the VPS is `restrict,port-forwarding,permitopen="192.0.2.1:1",permitlisten="localhost:8677"`:
 it can open `-R localhost:8677` and nothing else. No shell (`sshtunnel` has `/bin/true`), no other ports,
 no public bind, no `-L` pivot. `permitopen` points at an RFC 5737 address because authorized_keys has no
 `none` keyword (sshd rejects the whole line). The VPS host key is pinned (`StrictHostKeyChecking=yes`);
 the fingerprint in `group_vars/all.yml` was verified on the VPS itself.
 
-## Order of operations
+## Mac mini (current)
 
-1. **Check the key.** On the Pi: `ssh-keygen -lf /var/lib/rvtunnel/id_ed25519.pub` must print
-   `SHA256:8nh5HUHv6zAkRMZm9nOJTQ6waznbOS1lUGyS3CNHFaY` (matches `rvtunnel_pubkey`).
+Run these in order. Steps marked batcomputer run in `ansible/lowones` there; the rest run on the Mac.
+
+1. **Mac:** `sudo bash bootstrap-mac.sh`. Safe to re-run. Copy the public key it prints.
+2. **batcomputer:** put that key in `group_vars/all.yml` (`rvtunnel_pubkey`), then
+   ```
+   ansible-playbook vps-tunnel-keys.yml --check --diff -K
+   ansible-playbook vps-tunnel-keys.yml -K
+   ```
+3. **VPS:** the play only adds keys. If this replaces an earlier tunnel key, delete the old line from
+   `~sshtunnel/.ssh/authorized_keys` by hand (check the fingerprint with `ssh-keygen -lf` first), then confirm
+   `sudo ss -tlnp | grep :8677` is clear. fail2ban's sshd jail is active, so authorize the key BEFORE step 4.
+4. **Mac:** `sudo launchctl bootstrap system /Library/LaunchDaemons/com.lowones.rvtunnel.plist`, then
+   `sudo launchctl print system/com.lowones.rvtunnel | grep -E 'state|pid|last exit'` should show `running`.
+   Log: `sudo tail /var/db/rvtunnel/rvtunnel.log` (silence is normal).
+5. **Authorize batcomputer on the Mac** (a one-time line in `~/.ssh/authorized_keys` for `lowone`), test
+   `ssh -J lowone@service.low-ones.com:7822 -p 8677 -o HostKeyAlias=mini lowone@localhost`, and only then run
+   `sudo bash harden-sshd-mac.sh` (it disables password login). Keep a second session open while you do.
+6. **Reboot the Mac** and confirm the same login works with no manual step.
+
+Restart later: `sudo launchctl kickstart -k system/com.lowones.rvtunnel`. Gotchas: macOS `ssh-keyscan` prints a
+`# host SSH-2.0-...` comment line to stdout (filter it before `ssh-keygen -lf`); a LaunchDaemon with `UserName`
+cannot open a log under `/var/log` (exit 78), so the log lives in `/var/db/rvtunnel`.
+
+## Order of operations (Pi host, legacy)
+
+These steps describe the original Pi setup. `rvtunnel_pubkey` now holds the mini's key, so the Pi role's key
+assert fails until the Pi has its own variable; give it one if the Pi returns as a tunnel.
+
+1. **Check the key.** On the Pi: `ssh-keygen -lf /var/lib/rvtunnel/id_ed25519.pub` must match
+   the key you authorize on the VPS (the Pi's original key, `SHA256:8nh5HUHv6zAkRMZm9nOJTQ6waznbOS1lUGyS3CNHFaY`,
+   was revoked on the VPS on 2026-10-15 when its SD card cracked).
 2. **Pi user + key (already done by hand once):**
    `sudo useradd --system --create-home --home-dir /var/lib/rvtunnel --shell /usr/sbin/nologin rvtunnel`
    then `sudo -u rvtunnel ssh-keygen -t ed25519 -N "" -C rvtunnel@zero -f /var/lib/rvtunnel/id_ed25519`.
@@ -63,11 +98,13 @@ the fingerprint in `group_vars/all.yml` was verified on the VPS itself.
 
 - **The role never restarts the tunnel** (it would cut its own connection). If the unit changes, restart it
   over Tailscale: `sudo systemctl restart rvtunnel-lowones`.
-- The tunnel exposes the Pi's sshd on the VPS loopback. Make sure the Pi is key-only
-  (`sudo sshd -T | grep -E "passwordauthentication|permitrootlogin"`); Raspberry Pi OS defaults to passwords on.
+- The tunnel exposes the host's sshd on the VPS loopback, so it must be key-only. Mac: `harden-sshd-mac.sh`
+  (verify with `sudo sshd -T | grep -E "passwordauthentication|authenticationmethods"`). Pi: same check;
+  Raspberry Pi OS defaults to passwords on.
 - `RestartSec=60`, same as oracle's unit, to stay under fail2ban's radar during outages.
-- If the Pi is rebuilt it gets a new key: update `rvtunnel_pubkey` and re-run `vps-tunnel-keys.yml`.
-  The role asserts the Pi's key matches the var, so a mismatch fails loudly instead of silently.
+- If the tunnel host is rebuilt it gets a new key: update `rvtunnel_pubkey`, re-run `vps-tunnel-keys.yml`, and
+  remove the old key's line on the VPS by hand (the play is non-exclusive). The Pi role asserts the Pi's key
+  matches the var, so a mismatch fails loudly instead of silently.
 - Next phases (not started): rest of the VPS under Ansible (sshd drop-ins incl. post-quantum KEX and
   `AcceptEnv`, firewalld, fail2ban, Caddy, matrix-watchdog, cron), then restrict tron's/oracle's keys
   (tron's matrix tunnel also binds `172.17.0.1:8675`, so its `permitlisten` must allow that too).
@@ -75,18 +112,18 @@ the fingerprint in `group_vars/all.yml` was verified on the VPS itself.
 ## Jump host for batcomputer (`vps-admin-keys.yml`)
 
 batcomputer's Ansible key on the VPS (user `lowone`, comment `batcomputer-ansible`) was `restrict,pty`,
-so ProxyJump through the VPS to the Pi's tunnel port failed with "administratively prohibited".
+so ProxyJump through the VPS to the RV tunnel port failed with "administratively prohibited".
 This play rewrites that one line to
 `restrict,pty,port-forwarding,permitopen="localhost:8677",permitlisten="192.0.2.1:1"`:
-it may forward to the Pi's port and nothing else, and still cannot open listeners (`permitlisten`
+it may forward to the tunnel port and nothing else, and still cannot open listeners (`permitlisten`
 points at RFC 5737 TEST-NET-1 for the same reason as `permitopen` above). `lowone` already has sudo
-and a shell on the VPS, so this adds no real capability. Run it before `pi-tunnel.yml`.
+and a shell on the VPS, so this adds no real capability. Run it before ProxyJump is used for the first time.
 The target string must stay `localhost`, matching the inventory's jump target.
 
 ## Stale session / "remote port forwarding failed" (seen Oct 14)
 
-Symptom (Pi): `journalctl -u rvtunnel-lowones` shows `Error: remote port forwarding failed for listen port 8677`
-every ~60s. Cause: the old session died without a FIN (Starlink blip) and the VPS still holds
+Symptom: the tunnel client logs `Error: remote port forwarding failed for listen port 8677` every ~60s
+(Pi: `journalctl -u rvtunnel-lowones`; Mac: `/var/db/rvtunnel/rvtunnel.log`). Cause: the old session died without a FIN (Starlink blip) and the VPS still holds
 `127.0.0.1:8677`, because `ClientAliveInterval` was 0. With `ExitOnForwardFailure=yes` every retry then fails.
 
 - Permanent fix: `ansible-playbook vps-sshd.yml -K` (verify: `sudo sshd -T | grep clientalive` -> 30 / 3).
@@ -95,7 +132,8 @@ every ~60s. Cause: the old session died without a FIN (Starlink blip) and the VP
 - The unit has `ConnectTimeout=20`: during an outage a connect attempt gives up in 20s instead of hanging ~2 min,
   so recovery after the network returns is ~1 min. Changing the unit means a manual restart over Tailscale
   (`sudo systemctl restart rvtunnel-lowones`); the role never restarts the tunnel itself.
+  The Mac plist carries the same ssh options; restart it with `sudo launchctl kickstart -k system/com.lowones.rvtunnel`.
 - Alarm: `ansible-playbook vps-tunnel-health.yml -K -e rvtunnel_hc_url=https://hc-ping.com/<uuid>`.
-- Test the recovery on purpose (the Pi stays reachable over Tailscale): on the Pi
+- Test the recovery on purpose (Pi, Linux only; not yet adapted for the Mac; the Pi stays reachable over Tailscale): on the Pi
   `sudo iptables -I OUTPUT -p tcp --dport 7822 -j DROP`, wait ~3 min, then
   `sudo iptables -D OUTPUT -p tcp --dport 7822 -j DROP`; the tunnel should return without help.

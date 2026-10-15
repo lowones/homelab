@@ -1,12 +1,13 @@
 ---
-# Authorize the RV Pi's tunnel key on low-ones. Touches ONLY ~sshtunnel/.ssh/authorized_keys
-# (non-exclusive: tron's and oracle's keys are left exactly as they are). Does not touch sshd.
+# Authorize the RV tunnel host's key (rvtunnel_pubkey) on low-ones. Touches ONLY ~sshtunnel/.ssh/authorized_keys
+# (non-exclusive: tron's and oracle's keys are left exactly as they are, and a replaced host's old key is
+# NOT removed: delete that line by hand). Does not touch sshd.
 #
 #   ansible-playbook vps-tunnel-keys.yml --check --diff -K
 #   ansible-playbook vps-tunnel-keys.yml -K
 #
-# Run this BEFORE the Pi's tunnel service is enabled: fail2ban's sshd jail is active on the VPS.
-- name: Authorize the RV Pi tunnel key on low-ones
+# Run this BEFORE the tunnel client is started: fail2ban's sshd jail is active on the VPS.
+- name: Authorize the RV tunnel key on low-ones
   hosts: vps
   gather_facts: false
   tasks:
@@ -43,7 +44,7 @@
       delegate_to: localhost
       become: false
 
-    - name: Authorize the Pi's key (one loopback port, no shell, no other forwarding)
+    - name: Authorize the tunnel host's key (one loopback port, no shell, no other forwarding)
       ansible.posix.authorized_key:
         user: "{{ lowones_tunnel_user }}"
         key: "{{ rvtunnel_pubkey }}"

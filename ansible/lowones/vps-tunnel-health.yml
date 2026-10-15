@@ -1,8 +1,8 @@
 ---
-# Alarm if the RV Pi's tunnel is down, via Healthchecks.io.
+# Alarm if the RV tunnel is down, via Healthchecks.io.
 #
 # Checking that port 8677 is open is NOT enough: a stale session holds the port while the tunnel is dead.
-# So the check reads the SSH banner THROUGH the tunnel. Only the Pi's sshd can answer that.
+# So the check reads the SSH banner THROUGH the tunnel. Only the tunnel host's sshd can answer that.
 #
 # The ping URL is not stored in the repo. Create a check in Healthchecks.io (period 1 min, grace ~10 min)
 # and pass its ping URL at run time:
