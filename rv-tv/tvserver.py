@@ -54,7 +54,10 @@ def load_env():
             line = line.strip()
             if line and not line.startswith("#") and "=" in line:
                 k, v = line.split("=", 1)
-                os.environ.setdefault(k.strip(), v.strip())
+                v = v.strip()
+                if len(v) > 1 and v[0] == v[-1] and v[0] in "\"'":
+                    v = v[1:-1]           # tv.env is also sourced by the shell, so URLs with & need quotes
+                os.environ.setdefault(k.strip(), v)
 
 
 load_env()
