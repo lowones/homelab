@@ -18,3 +18,7 @@ tab_color_root:
 # host's host_vars. Unconfigured hosts get the drab black square on purpose.
 tab_emoji: "⬛"
 tab_emoji_root: "🔴"
+
+# Prompt: user@host takes the host colour (from tab_color); the path uses this SGR code.
+# 01;34 is the usual blue. Set it per host when the host colour is also blue.
+tab_path_sgr: "01;34"

@@ -1,2 +1,3 @@
 tab_color: { r: 40,  g: 90,  b: 200 }
 tab_emoji: "🟦"
+tab_path_sgr: "01;36"   # host colour is blue, so the path goes cyan
