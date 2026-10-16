@@ -492,12 +492,13 @@ DATE_RE = re.compile(r"^\s*(\d{1,2})/(\d{1,2})/(\d{4})\s*$")
 
 
 def parse_itinerary(text):
-    """CSV text -> sorted [(date, city)]. City is '' on days the sheet leaves blank."""
+    """CSV text -> sorted [(date, city, row)]. City is '' on days the sheet leaves blank;
+    row is the 1-based sheet row."""
     rows = []
-    for r in csv.reader(io.StringIO(text)):
+    for n, r in enumerate(csv.reader(io.StringIO(text)), 1):
         m = DATE_RE.match(r[1]) if len(r) > 1 else None
         if m:
-            rows.append((datetime.date(int(m[3]), int(m[1]), int(m[2])), r[3].strip() if len(r) > 3 else ""))
+            rows.append((datetime.date(int(m[3]), int(m[1]), int(m[2])), r[3].strip() if len(r) > 3 else "", n))
     return sorted(rows, key=lambda x: x[0])
 
 
@@ -528,13 +529,27 @@ def itinerary_city(today):
                 log.warning("itinerary fetch failed: %s", _itin["error"])
     rows = sorted((r for v in _itin["rows"].values() for r in v), key=lambda x: x[0])
     city = None
-    for d, c in rows:
+    for d, c, _row in rows:
         if d > today:
             break
         city = c or city
     if rows and today > rows[-1][0] + datetime.timedelta(days=14):
         return None
     return city
+
+
+def sheet_target(today):
+    """Blocking. TV_SHEET_URL aimed at today's row, so the kiosk (which is not signed in to
+    Google, so no on-open script runs) still opens on the right tab at the right place.
+    Falls back to the plain link when the schedule has no row for today."""
+    itinerary_city(today)                       # refreshes the cached sources
+    base = SHEET_URL.split("#")[0].split("?")[0]
+    for src in ITIN_SOURCES:
+        g = re.search(r"[?&]gid=(\d+)", src)
+        row = next((r for d, _c, r in _itin["rows"].get(src, []) if d == today), None)
+        if g and row:
+            return f"{base}?gid={g[1]}#gid={g[1]}&range=A{row}"
+    return SHEET_URL
 
 
 def itinerary_location(today):
@@ -655,7 +670,12 @@ async def _display_open(tv, page="dashboard"):
     await loop.run_in_executor(None, kiosk_stop)            # replace any running copy
     RUN_DIR.mkdir(parents=True, exist_ok=True)
     if page == "sheet":
-        token, url = None, SHEET_URL                         # an ordinary web page: no token
+        token = None                                         # an ordinary web page: no token
+        try:
+            url = await loop.run_in_executor(None, sheet_target, datetime.date.today())
+        except Exception as e:
+            log.warning("sheet jump failed, opening the plain link: %s", e)
+            url = SHEET_URL
     else:
         token = secrets.token_urlsafe(18)                    # fresh, valid only until close
         url = f"http://{BIND}:{SERVER_PORT}/display#{token}"

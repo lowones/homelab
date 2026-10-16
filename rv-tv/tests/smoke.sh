@@ -108,17 +108,17 @@ chk "kiosk token dies on close"       401 -H "$A $KT" $B/display/data
 body "close when closed is fine"      '"was_open":false'      -X POST -H "$A admintok" $B/display/close
 
 echo "-- weather follows the trip schedule; sheet button"
-$PY - "$T" <<'EOF2'
+$PY - "$T/stub" <<'EOF2'
 import datetime, sys
 t = datetime.date.today(); f = lambda d: f"{d.month}/{d.day}/{d.year}"
 D = datetime.timedelta
 open(sys.argv[1] + "/trip.csv", "w").write(
     "W,DATE,DAY,CITY,CAMPGROUND\n"
-    f"1,{f(t - D(3))},x,\"Moab, UT\",Site A\n1,{f(t - D(2))},x,,\n1,{f(t - D(1))},x,,\n"
+    f"1,{f(t - D(3))},x,\"Moab, UT\",Site A\n1,{f(t - D(2))},x,,\n1,{f(t)},x,,\n"
     f"1,{f(t + D(5))},x,\"Page, AZ\",Site B\n")
 EOF2
 T2=$T/second; mkdir -p $T2
-TV_SERVER_PORT=8797 TV_DISPLAY_FILE=$T2/display.json TV_ITINERARY=$T/trip.csv \
+TV_SERVER_PORT=8797 TV_DISPLAY_FILE=$T2/display.json TV_ITINERARY="http://127.0.0.1:$STUB_PORT/trip.csv?gid=555" \
   TV_SHEET_URL=http://127.0.0.1:$STUB_PORT/the-sheet $PY "$HERE/tvserver.py" > $T/server2.log 2>&1 & P4=$!
 for i in $(seq 1 30); do curl -fs http://127.0.0.1:8797/health >/dev/null 2>&1 && break; sleep 0.3; done
 B2=http://127.0.0.1:8797
@@ -132,7 +132,7 @@ chk "no sheet -> 404 on first server"  404 -X POST -H "$A admintok" "$B/display/
 chk "bad page name rejected"           422 -X POST -H "$A admintok" "$B2/display/open?tv=false&page=evil"
 chk "guest cannot open sheet"          403 -X POST -H "$A $G" "$B2/display/open?page=sheet"
 body "sheet opens"                     '"page":"sheet"'         -X POST -H "$A admintok" "$B2/display/open?tv=false&page=sheet"
-if [ "$(tail -1 $T/browser.args)" = "http://127.0.0.1:$STUB_PORT/the-sheet" ]; then echo "ok   browser got the sheet url, no token in it"; else echo "FAIL sheet url: $(tail -1 $T/browser.args)"; fail=1; fi
+if [ "$(tail -1 $T/browser.args)" = "http://127.0.0.1:$STUB_PORT/the-sheet?gid=555#gid=555&range=A4" ]; then echo "ok   browser got the sheet url aimed at today's row (tab 555, row 4)"; else echo "FAIL sheet url: $(tail -1 $T/browser.args)"; fail=1; fi
 body "state shows sheet page"          '"page":"sheet"'         -H "$A admintok" $B2/display/state
 body "close the sheet"                 '"was_open":true'        -X POST -H "$A admintok" $B2/display/close
 
