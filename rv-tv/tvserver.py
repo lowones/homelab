@@ -79,6 +79,11 @@ DEFAULT_LOC = {"lat": 42.7325, "lon": -84.5555, "label": "Lansing, MI"}
 # (a Google Sheets export URL per tab, or a path to a saved .csv). Column 2 is the date
 # (m/d/yyyy), column 4 the city ("Moab, UT"); blank cities mean "still there".
 ITIN_SOURCES = [x.strip() for x in os.environ.get("TV_ITINERARY", "").split(",") if x.strip()]
+
+# The Mac's own position, refreshed by locationagent.sh (see install-tvserver.sh).
+LOCATION_FILE = Path(os.environ.get("TV_LOCATION_FILE") or Path(__file__).resolve().parent / ".run" / "location.raw")
+DEVICE_MAX_AGE = 30 * 60     # seconds: an older fix is ignored
+DEVICE_MAX_ACC = 5000        # meters: coarser than this is probably an IP-based guess
 # Optional: the page the "Open sheet" button shows on the Mac's screen.
 SHEET_URL = os.environ.get("TV_SHEET_URL", "").strip()
 US_STATES = {"AL": "Alabama", "AK": "Alaska", "AZ": "Arizona", "AR": "Arkansas", "CA": "California",
@@ -566,16 +571,56 @@ def itinerary_location(today):
     return {"lat": lat, "lon": lon, "label": city, "source": "itinerary"}
 
 
+def _km(a, b):
+    """Great-circle distance in km between two {'lat','lon'} dicts."""
+    import math
+    p1, p2 = math.radians(a["lat"]), math.radians(b["lat"])
+    h = (math.sin((p2 - p1) / 2) ** 2
+         + math.cos(p1) * math.cos(p2) * math.sin(math.radians(b["lon"] - a["lon"]) / 2) ** 2)
+    return 6371 * 2 * math.asin(math.sqrt(h))
+
+
+def device_location():
+    """The Mac's own fix from LOCATION_FILE ('lat|lon|accuracy_m|city|state'), or None when the
+    file is missing, unreadable, stale (file age) or too coarse. Coordinates are rounded to
+    0.01 degree (~1 km) so Wi-Fi jitter does not bust the weather cache."""
+    try:
+        age = time.time() - LOCATION_FILE.stat().st_mtime
+        parts = LOCATION_FILE.read_text().strip().split("|") + [""] * 5
+        lat, lon, acc = float(parts[0]), float(parts[1]), float(parts[2])
+    except (OSError, ValueError):
+        return None
+    if age > DEVICE_MAX_AGE or not (-90 <= lat <= 90 and -180 <= lon <= 180) or not (0 <= acc <= DEVICE_MAX_ACC):
+        return None
+
+    def clean(s):
+        s = s.strip()
+        return "" if s.lower() in ("(null)", "null", "nil") else s
+    city, region = clean(parts[3]), clean(parts[4])
+    abbr = {v.lower(): k for k, v in US_STATES.items()}.get(region.lower(), region)
+    label = ", ".join(x for x in (city, abbr) if x) or f"{lat:.2f}, {lon:.2f}"
+    return {"lat": round(lat, 2), "lon": round(lon, 2), "label": label, "source": "device",
+            "accuracy": round(acc)}
+
+
 async def current_location():
+    """manual pin > device fix > trip schedule > saved default."""
     loc = load_location()
-    if ITIN_SOURCES and loc.get("mode", "auto") != "manual":
-        try:
-            found = await asyncio.get_running_loop().run_in_executor(
-                None, itinerary_location, datetime.date.today())
-            if found:
-                return found
-        except Exception as e:
-            log.warning("itinerary location failed: %s", e)
+    if loc.get("mode", "auto") != "manual":
+        itin = None
+        if ITIN_SOURCES:
+            try:
+                itin = await asyncio.get_running_loop().run_in_executor(
+                    None, itinerary_location, datetime.date.today())
+            except Exception as e:
+                log.warning("itinerary location failed: %s", e)
+        dev = device_location()
+        if dev:
+            if itin and _km(dev, itin) > 50:          # the sheet and the Mac disagree: say so
+                dev["schedule"] = itin["label"]
+            return dev
+        if itin:
+            return itin
     return {**loc, "source": "manual"}
 
 
@@ -612,7 +657,7 @@ async def get_weather():
                 _weather["data"] = None
             log.warning("weather fetch failed: %s", _weather["error"])
     return {"location": loc["label"], "source": loc["source"], "data": _weather["data"], "error": _weather["error"],
-            "updated": _weather["at"]}
+            "updated": _weather["at"], "schedule": loc.get("schedule")}
 
 
 @app.get("/whoami")
@@ -731,7 +776,7 @@ async def set_location(place: str = Query("", max_length=80),
     Give either place=\"Moab, Utah\" (looked up for you) or lat= and lon=, which pins the
     weather there. auto=true goes back to following the itinerary."""
     if auto:
-        if not ITIN_SOURCES:
+        if not ITIN_SOURCES and not LOCATION_FILE.exists():
             raise HTTPException(400, "no itinerary configured: add TV_ITINERARY=<csv url> to tv.env")
         save_state(mode="auto")
         _weather["next"] = 0.0
