@@ -17,6 +17,9 @@ is the TV when the TV is on HDMI_1); POST /display/close removes it.
   TV_WEATHER_URL      weather API base (default Open-Meteo, no key needed)
 """
 import asyncio
+import csv
+import datetime
+import io
 import json
 import logging
 import os
@@ -69,6 +72,22 @@ STATE_FILE = Path(os.environ.get("TV_DISPLAY_FILE", str(BASE / "display.json")))
 WEATHER_URL = os.environ.get("TV_WEATHER_URL", "https://api.open-meteo.com/v1/forecast")
 GEOCODE_URL = os.environ.get("TV_GEOCODE_URL", "https://geocoding-api.open-meteo.com/v1/search")
 DEFAULT_LOC = {"lat": 42.7325, "lon": -84.5555, "label": "Lansing, MI"}
+# Optional: where the weather looks follows the trip schedule. Comma-separated CSV sources
+# (a Google Sheets export URL per tab, or a path to a saved .csv). Column 2 is the date
+# (m/d/yyyy), column 4 the city ("Moab, UT"); blank cities mean "still there".
+ITIN_SOURCES = [x.strip() for x in os.environ.get("TV_ITINERARY", "").split(",") if x.strip()]
+# Optional: the page the "Open sheet" button shows on the Mac's screen.
+SHEET_URL = os.environ.get("TV_SHEET_URL", "").strip()
+US_STATES = {"AL": "Alabama", "AK": "Alaska", "AZ": "Arizona", "AR": "Arkansas", "CA": "California",
+             "CO": "Colorado", "CT": "Connecticut", "DE": "Delaware", "FL": "Florida", "GA": "Georgia",
+             "HI": "Hawaii", "ID": "Idaho", "IL": "Illinois", "IN": "Indiana", "IA": "Iowa", "KS": "Kansas",
+             "KY": "Kentucky", "LA": "Louisiana", "ME": "Maine", "MD": "Maryland", "MA": "Massachusetts",
+             "MI": "Michigan", "MN": "Minnesota", "MS": "Mississippi", "MO": "Missouri", "MT": "Montana",
+             "NE": "Nebraska", "NV": "Nevada", "NH": "New Hampshire", "NJ": "New Jersey", "NM": "New Mexico",
+             "NY": "New York", "NC": "North Carolina", "ND": "North Dakota", "OH": "Ohio", "OK": "Oklahoma",
+             "OR": "Oregon", "PA": "Pennsylvania", "RI": "Rhode Island", "SC": "South Carolina",
+             "SD": "South Dakota", "TN": "Tennessee", "TX": "Texas", "UT": "Utah", "VT": "Vermont",
+             "VA": "Virginia", "WA": "Washington", "WV": "West Virginia", "WI": "Wisconsin", "WY": "Wyoming"}
 
 # Keep this list identical to the one used when the TV was paired. Permissions are
 # fixed at pairing time, so changing it means pairing again.
@@ -201,7 +220,7 @@ GUEST_INPUTS = {"HDMI_1"}                      # guests may only switch to the M
 GUEST_APPS = {"netflix", "amazon", "youtube.leanback.v4"}
 _tok_cache = {"mtime": None, "data": {}}
 ALL_ACTIONS = GUEST_ACTIONS + ["display", "display_data", "admin"]
-_display = {"token": None, "proc": None, "browser": None}   # the running kiosk, if any
+_display = {"token": None, "proc": None, "browser": None, "page": None}   # the running kiosk, if any
 
 
 def load_tokens():
@@ -444,14 +463,102 @@ def kiosk_stop():
         except subprocess.TimeoutExpired:
             p.kill()
             p.wait()
-    _display.update(proc=None, token=None, browser=None)
+    _display.update(proc=None, token=None, browser=None, page=None)
 
 
 def load_location():
+    """The saved (manual) place plus the mode: 'auto' follows the itinerary when one is set."""
     try:
         return {**DEFAULT_LOC, **json.loads(STATE_FILE.read_text())}
     except (FileNotFoundError, ValueError):
         return dict(DEFAULT_LOC)
+
+
+def save_state(**changes):
+    cur = load_location()
+    cur.update(changes)
+    fd = os.open(str(STATE_FILE), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        json.dump(cur, f)
+    return cur
+
+
+_itin = {"rows": {}, "next": {}, "error": None}     # per source: parsed rows, when to refetch
+_geo = {}                                            # city -> (lat, lon, label)
+DATE_RE = re.compile(r"^\s*(\d{1,2})/(\d{1,2})/(\d{4})\s*$")
+
+
+def parse_itinerary(text):
+    """CSV text -> sorted [(date, city)]. City is '' on days the sheet leaves blank."""
+    rows = []
+    for r in csv.reader(io.StringIO(text)):
+        m = DATE_RE.match(r[1]) if len(r) > 1 else None
+        if m:
+            rows.append((datetime.date(int(m[3]), int(m[1]), int(m[2])), r[3].strip() if len(r) > 3 else ""))
+    return sorted(rows, key=lambda x: x[0])
+
+
+def read_source(src):
+    if src.startswith(("http://", "https://")):
+        req = urllib.request.Request(src, headers={"User-Agent": "rv-tv"})
+        with urllib.request.urlopen(req, timeout=10) as r:
+            text = r.read().decode("utf-8", "replace")
+        if text.lstrip()[:1] == "<":       # an HTML page: Google wants a sign-in
+            raise ValueError("got a web page instead of CSV; share the sheet as 'anyone with the link can view'")
+        return text
+    return Path(src).read_text()
+
+
+def itinerary_city(today):
+    """Blocking. The city for `today`: the last city named on or before it, up to 14 days
+    after the final dated row (so a stale sheet does not pin the weather forever)."""
+    now = time.time()
+    for src in ITIN_SOURCES:
+        if now >= _itin["next"].get(src, 0):
+            try:
+                _itin["rows"][src] = parse_itinerary(read_source(src))
+                _itin["next"][src] = now + 6 * 3600
+                _itin["error"] = None
+            except Exception as e:
+                _itin["error"] = str(e) or type(e).__name__
+                _itin["next"][src] = now + 300
+                log.warning("itinerary fetch failed: %s", _itin["error"])
+    rows = sorted((r for v in _itin["rows"].values() for r in v), key=lambda x: x[0])
+    city = None
+    for d, c in rows:
+        if d > today:
+            break
+        city = c or city
+    if rows and today > rows[-1][0] + datetime.timedelta(days=14):
+        return None
+    return city
+
+
+def itinerary_location(today):
+    """Blocking. Location for today from the schedule, or None."""
+    city = itinerary_city(today)
+    if not city:
+        return None
+    if city not in _geo:
+        found = geocode(city)
+        if not found:
+            return None
+        _geo[city] = found
+    lat, lon, label = _geo[city]
+    return {"lat": lat, "lon": lon, "label": city, "source": "itinerary"}
+
+
+async def current_location():
+    loc = load_location()
+    if ITIN_SOURCES and loc.get("mode", "auto") != "manual":
+        try:
+            found = await asyncio.get_running_loop().run_in_executor(
+                None, itinerary_location, datetime.date.today())
+            if found:
+                return found
+        except Exception as e:
+            log.warning("itinerary location failed: %s", e)
+    return {**loc, "source": "manual"}
 
 
 def fetch_weather(loc):
@@ -473,7 +580,7 @@ def fetch_weather(loc):
 
 async def get_weather():
     """Cached 10 min; after a failure retry in 60 s and serve the last good data meanwhile."""
-    loc = load_location()
+    loc = await current_location()
     key = (loc["lat"], loc["lon"])
     now = time.time()
     if now >= _weather["next"] or _weather["key"] != key:
@@ -486,7 +593,7 @@ async def get_weather():
             if _weather["key"] != key:
                 _weather["data"] = None
             log.warning("weather fetch failed: %s", _weather["error"])
-    return {"location": loc["label"], "data": _weather["data"], "error": _weather["error"],
+    return {"location": loc["label"], "source": loc["source"], "data": _weather["data"], "error": _weather["error"],
             "updated": _weather["at"]}
 
 
@@ -509,18 +616,23 @@ async def display_data(who: Who = Depends(need("display_data"))):
 
 @app.get("/display/state")
 async def display_state(who: Who = Depends(need(None))):
-    return {"open": kiosk_running(), "browser": _display["browser"],
-            "location": load_location()}
+    return {"open": kiosk_running(), "page": _display["page"], "browser": _display["browser"],
+            "location": await current_location(), "itinerary": bool(ITIN_SOURCES),
+            "itinerary_error": _itin["error"], "sheet": bool(SHEET_URL)}
 
 
 @app.post("/display/open")
-async def display_open(tv: bool = Query(True), who: Who = Depends(need("display"))):
-    """Wake the TV, switch it to the Mac's input, and show the dashboard fullscreen."""
+async def display_open(tv: bool = Query(True), page: str = Query("dashboard", pattern="^(dashboard|sheet)$"),
+                       who: Who = Depends(need("display"))):
+    """Wake the TV, switch it to the Mac's input, and show the dashboard (or, with
+    page=sheet, the configured Google Sheet) fullscreen on the Mac's screen."""
+    if page == "sheet" and not SHEET_URL:
+        raise HTTPException(404, "no sheet configured: add TV_SHEET_URL=<link> to tv.env and restart")
     async with get_lock("display"):
-        return await _display_open(tv)
+        return await _display_open(tv, page)
 
 
-async def _display_open(tv):
+async def _display_open(tv, page="dashboard"):
     exe = find_browser()
     if not exe:
         raise HTTPException(500, "no kiosk-capable browser found: install Google Chrome, Brave, "
@@ -539,19 +651,22 @@ async def _display_open(tv):
     loop = asyncio.get_running_loop()
     await loop.run_in_executor(None, kiosk_stop)            # replace any running copy
     RUN_DIR.mkdir(parents=True, exist_ok=True)
-    token = secrets.token_urlsafe(18)                        # fresh, valid only until close
-    url = f"http://{BIND}:{SERVER_PORT}/display#{token}"
+    if page == "sheet":
+        token, url = None, SHEET_URL                         # an ordinary web page: no token
+    else:
+        token = secrets.token_urlsafe(18)                    # fresh, valid only until close
+        url = f"http://{BIND}:{SERVER_PORT}/display#{token}"
     logf = open(RUN_DIR / "kiosk.log", "ab")
     proc = subprocess.Popen(browser_cmd(exe, url), stdin=subprocess.DEVNULL,
                             stdout=logf, stderr=logf)
     logf.close()
-    _display.update(proc=proc, token=token, browser=os.path.basename(exe))
+    _display.update(proc=proc, token=token, browser=os.path.basename(exe), page=page)
     await asyncio.sleep(1.5)
     if proc.poll() is not None:                              # browser quit straight away
         code = proc.returncode
-        _display.update(proc=None, token=None, browser=None)
+        _display.update(proc=None, token=None, browser=None, page=None)
         raise TVError(f"the browser exited at once (code {code}); see {RUN_DIR / 'kiosk.log'}")
-    out.update(display="open", browser=os.path.basename(exe))
+    out.update(display="open", page=page, browser=os.path.basename(exe))
     return out
 
 
@@ -567,6 +682,9 @@ def geocode(place):
     """'Moab, Utah' -> (lat, lon, 'Moab, Utah'). Blocking; run in a thread."""
     name, _, hint = place.partition(",")
     hint = hint.strip().lower()
+    us = hint.upper() in US_STATES                      # "CA" means California, not Canada
+    if us:
+        hint = US_STATES[hint.upper()].lower()
     q = urllib.parse.urlencode({"name": name.strip(), "count": 10, "language": "en", "format": "json"})
     with urllib.request.urlopen(f"{GEOCODE_URL}?{q}", timeout=8) as r:
         results = json.load(r).get("results") or []
@@ -575,7 +693,8 @@ def geocode(place):
     def matches(x):
         fields = [str(x.get(k, "")).lower() for k in ("admin1", "country", "country_code")]
         return any(hint and (hint == f or hint in f) for f in fields)
-    best = next((x for x in results if matches(x)), results[0])
+    best = next((x for x in results if matches(x) and (not us or x.get("country_code") == "US")),
+                None) or next((x for x in results if matches(x)), results[0])
     label = ", ".join(v for v in (best.get("name"), best.get("admin1") or best.get("country")) if v)
     return best["latitude"], best["longitude"], label
 
@@ -583,9 +702,17 @@ def geocode(place):
 @app.post("/display/location")
 async def set_location(place: str = Query("", max_length=80),
                        lat: float = Query(None, ge=-90, le=90), lon: float = Query(None, ge=-180, le=180),
-                       label: str = Query("", max_length=60), who: Who = Depends(need("admin"))):
+                       label: str = Query("", max_length=60), auto: bool = Query(False),
+                       who: Who = Depends(need("admin"))):
     """Where the weather tile looks. The RV moves, so this is a setting, not a constant.
-    Give either place=\"Moab, Utah\" (looked up for you) or lat= and lon=."""
+    Give either place=\"Moab, Utah\" (looked up for you) or lat= and lon=, which pins the
+    weather there. auto=true goes back to following the itinerary."""
+    if auto:
+        if not ITIN_SOURCES:
+            raise HTTPException(400, "no itinerary configured: add TV_ITINERARY=<csv url> to tv.env")
+        save_state(mode="auto")
+        _weather["next"] = 0.0
+        return await current_location()
     if place.strip():
         try:
             found = await asyncio.get_running_loop().run_in_executor(None, geocode, place.strip())
@@ -597,9 +724,7 @@ async def set_location(place: str = Query("", max_length=80),
     elif lat is None or lon is None:
         raise HTTPException(400, "give place=... or both lat= and lon=")
     loc = {"lat": lat, "lon": lon, "label": label.strip() or f"{lat:.2f}, {lon:.2f}"}
-    fd = os.open(str(STATE_FILE), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w") as f:
-        json.dump(loc, f)
+    save_state(**loc, mode="manual")
     _weather["next"] = 0.0
     return loc
 
@@ -650,11 +775,13 @@ form button{padding:12px 14px}
 </div>
 <div class="grid">
  <button class="on" data-act="display" onclick="go('/display/open','Waking the TV and opening the dashboard (up to 40 s)...')">Show dashboard</button>
- <button data-act="display" onclick="go('/display/close','Closing the dashboard...')">Close dashboard</button>
+ <button data-act="display" onclick="go('/display/open?page=sheet','Opening the sheet on the Mac (up to 40 s)...')">Open sheet</button>
+ <button data-act="display" onclick="go('/display/close','Closing the screen...')">Close screen</button>
 </div>
 <form data-act="admin" onsubmit="setPlace(event)">
  <input id="place" placeholder="Weather place, e.g. Moab, Utah" autocomplete="off">
  <button>Set</button>
+ <button type="button" onclick="go('/display/location?auto=true','Weather now follows the trip schedule...')">Follow schedule</button>
 </form>
 <script>
 var T=location.hash.slice(1);
@@ -712,7 +839,7 @@ async function refresh(){
     else{line='TV is on'+(j.volume!=null?' - volume '+j.volume:'')+(j.muted?' (muted)':'')}
     if(can('display')){
       var d=await api('GET','/display/state');
-      if(d.ok&&d.j.open)line+=' - dashboard open';
+      if(d.ok&&d.j.open)line+=d.j.page==='sheet'?' - sheet open on the Mac':' - dashboard open';
     }
     show(line);
   }catch(e){show('Cannot reach the TV box. Are you on the RV Wi-Fi?')}
