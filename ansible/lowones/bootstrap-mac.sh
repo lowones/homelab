@@ -100,8 +100,10 @@ chown root:wheel $PLIST; chmod 644 $PLIST
 plutil -lint $PLIST
 echo "[4/5] wrote $PLIST (not loaded)"
 
-# 5. never sleep, power back on after outage
-for s in "sleep 0" "disksleep 0" "womp 1" "autorestart 1" "powernap 0" "tcpkeepalive 1"; do
+# 5. never sleep, power back on after outage. displaysleep 0 matters here: the
+# RV TV is this Mac's only display, and a sleeping display drops the HDMI signal,
+# so the TV shows "No Signal" and then powers itself off.
+for s in "sleep 0" "disksleep 0" "displaysleep 0" "womp 1" "autorestart 1" "powernap 0" "tcpkeepalive 1"; do
   pmset -a $s || echo "pmset $s not supported here, skipped"
 done
 echo "[5/5] power settings applied"

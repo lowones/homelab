@@ -46,6 +46,7 @@
     msg: >-
       {{ inventory_hostname }}:
       rgb={{ tab_color.r }},{{ tab_color.g }},{{ tab_color.b }}
+      marker={{ tab_emoji }}
       tmux={{ tabcolor_tmux_version | default('absent', true) }}
       passthrough={{ 'configured'
         if (tabcolor_tmux_version | length > 0

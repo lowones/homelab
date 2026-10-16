@@ -12,3 +12,9 @@ tab_color_root:
   r: 230
   g: 30
   b: 30
+
+# Title marker shown in terminals that cannot paint a tab (Ghostty, Termius...).
+# A coloured square roughly matching tab_color; set it next to tab_color in each
+# host's host_vars. Unconfigured hosts get the drab black square on purpose.
+tab_emoji: "⬛"
+tab_emoji_root: "🔴"
