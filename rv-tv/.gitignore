@@ -1,0 +1,12 @@
+# Secrets and per-machine state: never commit these
+tv.env
+tv.dev.env
+tv_key*.txt
+tokens*.json
+.venv/
+__pycache__/
+*.log
+*.pid
+*.crt
+*.key
+.run/
