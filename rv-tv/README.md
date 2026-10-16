@@ -33,7 +33,17 @@ browser window on the Mac pointed at `/display`. `POST /display/close` closes it
 - Add a widget: drop `display/widgets/<id>.js` exporting `{init, render(el, data), tick(el)}` and
   list `{"id": "<id>", "span": N}` in `display/layout.json` (12-column grid). `data` is the JSON from
   `/display/data` (`tv`, `weather`, `now`); add fields there in `tvserver.py` for new data sources.
-- CLI: `./tv display open|close|state`, `./tv place "City, State"`.
+- **Weather follows the trip schedule** (optional). Share the sheet as "anyone with the link can
+  view" and put the CSV export of each tab in `tv.env`, comma-separated:
+  `TV_ITINERARY=https://docs.google.com/spreadsheets/d/<ID>/export?format=csv&gid=<GID>,...`
+  (a path to a saved `.csv` also works). Today's city is the last one named on or before today
+  (column 4; blank rows mean "still there"; ignored 14 days after the last dated row). Refetched every
+  6 h. Setting a place by hand pins it; `./tv place auto` or "Follow schedule" goes back to the sheet.
+- **Open sheet** button: `TV_SHEET_URL=<sheet link>` in `tv.env` shows that page fullscreen on the Mac
+  instead of the dashboard (same permission as the dashboard; `./tv sheet`). The kiosk browser has its
+  own profile: sign in to Google there once (screen-share to the mini) if the sheet is not public.
+  Quit with the "Close screen" button, or Cmd+Q on the Mac.
+- CLI: `./tv display open|close|state`, `./tv sheet`, `./tv place "City, State"|auto`.
 
 ## Workflow
 1. `git switch -c my-feature`

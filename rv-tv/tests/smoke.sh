@@ -7,7 +7,7 @@ set -uo pipefail
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 PY="$HERE/.venv/bin/python"; [ -x "$PY" ] || PY=python3
 T=$(mktemp -d); MOCK_PORT=3198; API_PORT=8798; STUB_PORT=8799
-cleanup() { for p in ${P1:-} ${P2:-} ${P3:-}; do kill $p 2>/dev/null; done; rm -rf "$T"; }
+cleanup() { for p in ${P1:-} ${P2:-} ${P3:-} ${P4:-}; do kill $p 2>/dev/null; done; rm -rf "$T"; }
 trap cleanup EXIT
 openssl req -x509 -newkey rsa:2048 -nodes -days 2 -subj /CN=mock -keyout $T/mock.key -out $T/mock.crt 2>/dev/null
 echo mockkey123 > $T/key.txt   # the key the fake TV accepts
@@ -106,6 +106,35 @@ body "admin closes dashboard"         '"display":"closed"'    -X POST -H "$A adm
 body "state is closed again"          '"open":false'          -H "$A admintok" $B/display/state
 chk "kiosk token dies on close"       401 -H "$A $KT" $B/display/data
 body "close when closed is fine"      '"was_open":false'      -X POST -H "$A admintok" $B/display/close
+
+echo "-- weather follows the trip schedule; sheet button"
+$PY - "$T" <<'EOF2'
+import datetime, sys
+t = datetime.date.today(); f = lambda d: f"{d.month}/{d.day}/{d.year}"
+D = datetime.timedelta
+open(sys.argv[1] + "/trip.csv", "w").write(
+    "W,DATE,DAY,CITY,CAMPGROUND\n"
+    f"1,{f(t - D(3))},x,\"Moab, UT\",Site A\n1,{f(t - D(2))},x,,\n1,{f(t - D(1))},x,,\n"
+    f"1,{f(t + D(5))},x,\"Page, AZ\",Site B\n")
+EOF2
+T2=$T/second; mkdir -p $T2
+TV_SERVER_PORT=8797 TV_DISPLAY_FILE=$T2/display.json TV_ITINERARY=$T/trip.csv \
+  TV_SHEET_URL=http://127.0.0.1:$STUB_PORT/the-sheet $PY "$HERE/tvserver.py" > $T/server2.log 2>&1 & P4=$!
+for i in $(seq 1 30); do curl -fs http://127.0.0.1:8797/health >/dev/null 2>&1 && break; sleep 0.3; done
+B2=http://127.0.0.1:8797
+body "weather uses today's scheduled city" '"location":"Moab, UT"' -H "$A admintok" $B2/display/data
+body "state says itinerary source"     '"source":"itinerary"'   -H "$A admintok" $B2/display/state
+body "pin a place by hand"             '"label":"Moab, Utah"'   -X POST -H "$A admintok" "$B2/display/location?place=Moab,%20Utah"
+body "pinned place wins"               '"source":"manual"'      -H "$A admintok" $B2/display/state
+body "follow schedule again"           '"source":"itinerary"'   -X POST -H "$A admintok" "$B2/display/location?auto=true"
+chk "no itinerary -> auto refused"     400 -X POST -H "$A admintok" "$B/display/location?auto=true"
+chk "no sheet -> 404 on first server"  404 -X POST -H "$A admintok" "$B/display/open?tv=false&page=sheet"
+chk "bad page name rejected"           422 -X POST -H "$A admintok" "$B2/display/open?tv=false&page=evil"
+chk "guest cannot open sheet"          403 -X POST -H "$A $G" "$B2/display/open?page=sheet"
+body "sheet opens"                     '"page":"sheet"'         -X POST -H "$A admintok" "$B2/display/open?tv=false&page=sheet"
+if [ "$(tail -1 $T/browser.args)" = "http://127.0.0.1:$STUB_PORT/the-sheet" ]; then echo "ok   browser got the sheet url, no token in it"; else echo "FAIL sheet url: $(tail -1 $T/browser.args)"; fail=1; fi
+body "state shows sheet page"          '"page":"sheet"'         -H "$A admintok" $B2/display/state
+body "close the sheet"                 '"was_open":true'        -X POST -H "$A admintok" $B2/display/close
 
 echo "-- concurrent requests (guest page and dashboard polling at once)"
 pids=""; : > $T/par.txt
