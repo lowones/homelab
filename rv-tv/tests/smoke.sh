@@ -7,7 +7,7 @@ set -uo pipefail
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 PY="$HERE/.venv/bin/python"; [ -x "$PY" ] || PY=python3
 T=$(mktemp -d); MOCK_PORT=3198; API_PORT=8798; STUB_PORT=8799
-cleanup() { for p in ${P1:-} ${P2:-} ${P3:-} ${P4:-}; do kill $p 2>/dev/null; done; rm -rf "$T"; }
+cleanup() { for p in ${P1:-} ${P2:-} ${P3:-} ${P4:-} ${P5:-} ${P6:-}; do kill $p 2>/dev/null; done; rm -rf "$T"; }
 trap cleanup EXIT
 openssl req -x509 -newkey rsa:2048 -nodes -days 2 -subj /CN=mock -keyout $T/mock.key -out $T/mock.crt 2>/dev/null
 echo mockkey123 > $T/key.txt   # the key the fake TV accepts
@@ -30,7 +30,8 @@ MOCK_CERT_DIR=$T $PY "$HERE/tests/mocktv.py" $MOCK_PORT > $T/mock.log 2>&1 & P1=
 export TV_ENV_FILE=$T/none.env TV_TOKENS_FILE=$T/tokens.json TV_KEYFILE=$T/key.txt \
        TV_IP=127.0.0.1 TV_WS_PORT=$MOCK_PORT TV_TOKEN=admintok TV_BIND=127.0.0.1 TV_SERVER_PORT=$API_PORT \
        TV_DISPLAY_FILE=$T/display.json TV_WEATHER_URL=http://127.0.0.1:$STUB_PORT/v1/forecast \
-       TV_GEOCODE_URL=http://127.0.0.1:$STUB_PORT/v1/search TV_DISPLAY_BROWSER=$T/fakebrowser
+       TV_GEOCODE_URL=http://127.0.0.1:$STUB_PORT/v1/search TV_DISPLAY_BROWSER=$T/fakebrowser \
+       TV_LOCATION_FILE=$T/none.loc   # never read the real .run/location.raw
 $PY "$HERE/tvserver.py" > $T/server.log 2>&1 & P2=$!
 for i in $(seq 1 30); do curl -fs http://127.0.0.1:$API_PORT/health >/dev/null 2>&1 && break; sleep 0.3; done
 B=http://127.0.0.1:$API_PORT
@@ -135,6 +136,40 @@ body "sheet opens"                     '"page":"sheet"'         -X POST -H "$A a
 if [ "$(tail -1 $T/browser.args)" = "http://127.0.0.1:$STUB_PORT/the-sheet?gid=555#gid=555&range=A4" ]; then echo "ok   browser got the sheet url aimed at today's row (tab 555, row 4)"; else echo "FAIL sheet url: $(tail -1 $T/browser.args)"; fail=1; fi
 body "state shows sheet page"          '"page":"sheet"'         -H "$A admintok" $B2/display/state
 body "close the sheet"                 '"was_open":true'        -X POST -H "$A admintok" $B2/display/close
+
+echo "-- weather follows the Mac's own location (device fix)"
+T3=$T/third; mkdir -p $T3; LOC=$T/loc.raw; rm -f $LOC
+TV_SERVER_PORT=8796 TV_DISPLAY_FILE=$T3/display.json TV_LOCATION_FILE=$LOC \
+  TV_ITINERARY="http://127.0.0.1:$STUB_PORT/trip.csv?gid=555" $PY "$HERE/tvserver.py" > $T/server3.log 2>&1 & P5=$!
+for i in $(seq 1 30); do curl -fs http://127.0.0.1:8796/health >/dev/null 2>&1 && break; sleep 0.3; done
+B3=http://127.0.0.1:8796
+age() { $PY -c "import os,sys,time; t=time.time()-float(sys.argv[2]); os.utime(sys.argv[1],(t,t))" "$LOC" "$1"; }
+body "no device file -> schedule"          '"source":"itinerary"'     -H "$A admintok" $B3/display/data
+printf '46.004026|-123.903557|59|Seaside|OR\n' > $LOC
+body "fresh fix beats the schedule"        '"source":"device"'        -H "$A admintok" $B3/display/data
+body "device label is City, ST"            '"location":"Seaside, OR"' -H "$A admintok" $B3/display/data
+body "fix far from schedule: note it"      '"schedule":"Moab, UT"'    -H "$A admintok" $B3/display/data
+printf '38.57|-109.55|40|Moab|Utah\n' > $LOC
+body "state name becomes abbreviation"     '"location":"Moab, UT"'    -H "$A admintok" $B3/display/data
+body "fix agrees with schedule: no note"   '"schedule":null'          -H "$A admintok" $B3/display/data
+printf '46.004026|-123.903557|59|(null)|(null)\n' > $LOC
+body "(null) city falls back to coords"    '"location":"46.00, -123.90"' -H "$A admintok" $B3/display/data
+printf '46.0|-123.9|9000|Seaside|OR\n' > $LOC
+body "coarse fix (9 km) is ignored"        '"source":"itinerary"'     -H "$A admintok" $B3/display/data
+printf '46.0|-123.9|59|Seaside|OR\n' > $LOC; age 60
+body "1 minute old fix still used"         '"source":"device"'        -H "$A admintok" $B3/display/data
+age 7200
+body "2 hour old fix is ignored"           '"source":"itinerary"'     -H "$A admintok" $B3/display/data
+echo "this is not a fix" > $LOC
+body "garbage file is ignored"             '"source":"itinerary"'     -H "$A admintok" $B3/display/data
+printf '46.0|-123.9|59|Seaside|OR\n' > $LOC
+body "pin a place by hand (device on)"     '"label":"Moab, Utah"'     -X POST -H "$A admintok" "$B3/display/location?place=Moab,%20Utah"
+body "pin beats the device fix"            '"source":"manual"'        -H "$A admintok" $B3/display/data
+body "auto resumes the device fix"         '"source":"device"'        -X POST -H "$A admintok" "$B3/display/location?auto=true"
+T4=$T/fourth; mkdir -p $T4
+TV_SERVER_PORT=8795 TV_DISPLAY_FILE=$T4/display.json TV_LOCATION_FILE=$LOC $PY "$HERE/tvserver.py" > $T/server4.log 2>&1 & P6=$!
+for i in $(seq 1 30); do curl -fs http://127.0.0.1:8795/health >/dev/null 2>&1 && break; sleep 0.3; done
+chk "auto allowed with only a device fix" 200 -X POST -H "$A admintok" "http://127.0.0.1:8795/display/location?auto=true"
 
 echo "-- concurrent requests (guest page and dashboard polling at once)"
 pids=""; : > $T/par.txt

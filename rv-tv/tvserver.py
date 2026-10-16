@@ -849,7 +849,7 @@ form button{padding:12px 14px}
 <form data-act="admin" onsubmit="setPlace(event)">
  <input id="place" placeholder="Weather place, e.g. Moab, Utah" autocomplete="off">
  <button>Set</button>
- <button type="button" onclick="go('/display/location?auto=true','Weather now follows the trip schedule...')">Follow schedule</button>
+ <button type="button" onclick="go('/display/location?auto=true','Weather now follows the Mac location, then the trip schedule...')">Follow location</button>
 </form>
 <script>
 var T=location.hash.slice(1);
