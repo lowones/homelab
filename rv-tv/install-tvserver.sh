@@ -69,8 +69,23 @@ EOF
 plutil -lint "$PLIST" >/dev/null
 echo "[3/4] wrote $PLIST"
 
-launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
-launchctl bootstrap "gui/$(id -u)" "$PLIST"
+# Unload any running copy and WAIT until launchd has really dropped it. Bootstrapping while
+# the old one is still tearing down fails with "Bootstrap failed: 5: Input/output error".
+DOMAIN="gui/$(id -u)"
+launchctl bootout "$DOMAIN/$LABEL" 2>/dev/null || true
+for _ in $(seq 1 20); do
+  launchctl print "$DOMAIN/$LABEL" >/dev/null 2>&1 || break
+  sleep 0.5
+done
+if ! launchctl bootstrap "$DOMAIN" "$PLIST" 2>/dev/null; then
+  sleep 3   # one retry; the first attempt can still lose the race
+  launchctl bootstrap "$DOMAIN" "$PLIST" || {
+    echo "launchctl bootstrap failed twice."
+    echo "If you are connected over SSH, run this script in Terminal on the Mac itself:"
+    echo "the per-user launchd domain ($DOMAIN) needs a logged-in desktop session."
+    exit 1
+  }
+fi
 echo "[4/4] service loaded"
 
 set -a; . ./tv.env; set +a

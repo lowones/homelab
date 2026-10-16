@@ -26,3 +26,11 @@ Treat the token and guest links like passwords.
 TV `192.168.1.201` (DHCP lease, not reserved), MAC `ec:31:11:a2:e5:16`. HDMI_1 = the mini.
 Mini `pmset displaysleep` must be 0 or the TV loses signal and powers itself off.
 Guests: On/Off, Netflix, Prime, YouTube, Mac input, volume (see `GUEST_*` in `tvserver.py`).
+
+## Gotchas
+- Re-running `install-tvserver.sh` restarts the service (a few seconds of downtime). It waits for the
+  old copy to unload before loading the new one; if launchd still refuses, run it in Terminal on
+  the Mac itself, not over SSH (the per-user launchd domain needs a desktop login).
+- Verified 2026-10-15: after `sudo reboot` the service answers `./tv status` within about a minute
+  with no one touching the Mac (Local Network approval persists).
+- Release tags: `rv-tv-v1` = guest tokens + guest page, repo layout.
