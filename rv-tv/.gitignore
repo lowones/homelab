@@ -10,3 +10,4 @@ __pycache__/
 *.crt
 *.key
 .run/
+display.json

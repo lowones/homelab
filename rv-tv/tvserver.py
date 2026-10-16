@@ -6,7 +6,15 @@ Run:   python tvserver.py          start the API
 
 Config comes from tv.env next to this file (KEY=VALUE lines) or the environment:
   TV_IP, TV_MAC, TV_TOKEN (required), TV_BIND, TV_SERVER_PORT, TV_WS_PORT, TV_KEYFILE
-Every endpoint except /health needs:  Authorization: Bearer <TV_TOKEN>
+Every API endpoint except /health needs:  Authorization: Bearer <token>
+(the admin TV_TOKEN, or a guest token from tokens.json). /guest and /display serve pages
+that hold no secrets; they read the token from the URL fragment (#token).
+
+Display feature: POST /display/open puts a fullscreen dashboard on the Mac's screen (which
+is the TV when the TV is on HDMI_1); POST /display/close removes it.
+  TV_DISPLAY_BROWSER  path to a Chrome/Brave/Edge/Firefox binary (default: first one found)
+  TV_MAC_INPUT        the TV input the Mac is on (default HDMI_1)
+  TV_WEATHER_URL      weather API base (default Open-Meteo, no key needed)
 """
 import asyncio
 import json
@@ -15,13 +23,18 @@ import os
 import re
 import secrets
 import ssl
+import subprocess
 import sys
 import time
+import urllib.parse
+import urllib.request
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import websockets
 from fastapi import Depends, FastAPI, Header, HTTPException, Path as PathParam, Query
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 try:  # newer wakeonlan releases renamed the function
     from wakeonlan import wake as send_magic_packet
 except ImportError:
@@ -49,6 +62,13 @@ TV_WS_PORT = int(os.environ.get("TV_WS_PORT", "3001"))
 KEYFILE = Path(os.environ.get("TV_KEYFILE", str(BASE / "tv_key.txt")))
 BIND = os.environ.get("TV_BIND", "127.0.0.1")
 SERVER_PORT = int(os.environ.get("TV_SERVER_PORT", "8780"))
+MAC_INPUT = os.environ.get("TV_MAC_INPUT", "HDMI_1")
+DISPLAY_DIR = BASE / "display"
+RUN_DIR = BASE / ".run"
+STATE_FILE = Path(os.environ.get("TV_DISPLAY_FILE", str(BASE / "display.json")))
+WEATHER_URL = os.environ.get("TV_WEATHER_URL", "https://api.open-meteo.com/v1/forecast")
+GEOCODE_URL = os.environ.get("TV_GEOCODE_URL", "https://geocoding-api.open-meteo.com/v1/search")
+DEFAULT_LOC = {"lat": 42.7325, "lon": -84.5555, "label": "Lansing, MI"}
 
 # Keep this list identical to the one used when the TV was paired. Permissions are
 # fixed at pairing time, so changing it means pairing again.
@@ -64,7 +84,16 @@ class TVError(Exception):
     pass
 
 
-LOCK = asyncio.Lock()
+_locks = {}
+
+
+def get_lock(name):
+    """One asyncio.Lock per purpose, created on first use inside the running loop.
+    (On Python 3.9 a Lock made at import time is tied to the wrong event loop and raises
+    "attached to a different loop" as soon as two requests collide.)"""
+    if name not in _locks:
+        _locks[name] = asyncio.Lock()
+    return _locks[name]
 
 
 def load_key():
@@ -116,7 +145,7 @@ async def tv_connect(connect_timeout=5.0, register_timeout=15.0):
 
 
 async def call(uri, payload=None, expect_close=False):
-    async with LOCK:
+    async with get_lock("tv"):
         ws = await tv_connect()
         try:
             await ws.send(json.dumps(
@@ -171,6 +200,8 @@ GUEST_ACTIONS = ["status", "power_on", "power_off", "input", "volume", "mute", "
 GUEST_INPUTS = {"HDMI_1"}                      # guests may only switch to the Mac
 GUEST_APPS = {"netflix", "amazon", "youtube.leanback.v4"}
 _tok_cache = {"mtime": None, "data": {}}
+ALL_ACTIONS = GUEST_ACTIONS + ["display", "display_data", "admin"]
+_display = {"token": None, "proc": None, "browser": None}   # the running kiosk, if any
 
 
 def load_tokens():
@@ -208,6 +239,9 @@ def identify(authorization):
     tb = tok.encode()
     if secrets.compare_digest(tb, TV_TOKEN.encode()):
         return Who("admin", True, None)
+    dt = _display["token"]
+    if dt and secrets.compare_digest(tb, dt.encode()):
+        return Who("display", False, {"display_data"})   # the kiosk page: may read /display/data only
     for name, rec in load_tokens().items():
         if secrets.compare_digest(tb, str(rec.get("token", "")).encode()):
             return Who(name, False, set(rec.get("actions", GUEST_ACTIONS)))
@@ -219,15 +253,22 @@ def need(action):
         if not TV_TOKEN:
             raise HTTPException(500, "server has no TV_TOKEN configured")
         who = identify(authorization)
-        if not who.admin and action not in who.actions:
+        if action and not who.admin and action not in who.actions:
             log.warning("denied: %s tried %s", who.name, action)
             raise HTTPException(403, f"not allowed: {action}")
-        log.info("%s: %s", who.name, action)
+        if action:
+            log.info("%s: %s", who.name, action)
         return who
     return dep
 
 
-app = FastAPI(title="RV TV control", docs_url=None, redoc_url=None, openapi_url=None)
+@asynccontextmanager
+async def lifespan(_app):
+    yield
+    kiosk_stop()          # closing the service also closes the dashboard it opened
+
+
+app = FastAPI(title="RV TV control", docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
 
 
 @app.exception_handler(TVUnreachable)
@@ -282,10 +323,10 @@ async def apps(who: Who = Depends(need("admin"))):
     return [{"id": a.get("id"), "title": a.get("title")} for a in r.get("launchPoints", [])]
 
 
-@app.post("/power/on")
-async def power_on(wait: int = Query(30, ge=0, le=120), who: Who = Depends(need("power_on"))):
-    if await tv_is_up():
-        return {"power": "on", "note": "already on"}
+async def wake_tv(wait, check_first=True):
+    """Send wake packets until the TV answers or `wait` seconds pass. True if it is up."""
+    if check_first and await tv_is_up():
+        return True
     waited = 0
     while True:
         try:
@@ -293,12 +334,20 @@ async def power_on(wait: int = Query(30, ge=0, le=120), who: Who = Depends(need(
         except OSError as e:
             raise TVError(f"could not send wake packet: {e}")
         if waited >= wait:
-            break
+            return False
         for _ in range(3):
             await asyncio.sleep(1)
             waited += 1
         if await tv_is_up():
-            return {"power": "on"}
+            return True
+
+
+@app.post("/power/on")
+async def power_on(wait: int = Query(30, ge=0, le=120), who: Who = Depends(need("power_on"))):
+    if await tv_is_up():
+        return {"power": "on", "note": "already on"}
+    if await wake_tv(wait, check_first=False):
+        return {"power": "on"}
     return JSONResponse(status_code=202, content={
         "power": "unknown", "detail": "wake packet sent but the TV is not answering yet"})
 
@@ -355,6 +404,210 @@ async def launch_app(app_id: str, who: Who = Depends(need("app"))):
     return {"launched": app_id}
 
 
+# ---- display: dashboard shown on the Mac's own screen ---------------------------
+CHROMIUM = ["/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+            "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+            "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"]
+FIREFOX = "/Applications/Firefox.app/Contents/MacOS/firefox"
+_weather = {"data": None, "key": None, "next": 0.0, "error": None, "at": None}
+
+
+def find_browser():
+    override = os.environ.get("TV_DISPLAY_BROWSER")
+    for c in ([override] if override else CHROMIUM + [FIREFOX]):
+        if c and os.access(c, os.X_OK):
+            return c
+    return None
+
+
+def browser_cmd(exe, url):
+    firefox = "firefox" in exe.lower()
+    prof = RUN_DIR / ("kiosk-firefox" if firefox else "kiosk-profile")
+    prof.mkdir(parents=True, exist_ok=True)
+    if firefox:
+        return [exe, "--kiosk", "--no-remote", "--profile", str(prof), url]
+    return [exe, "--kiosk", f"--user-data-dir={prof}", "--no-first-run",
+            "--no-default-browser-check", "--noerrdialogs", "--disable-infobars", url]
+
+
+def kiosk_running():
+    p = _display["proc"]
+    return p is not None and p.poll() is None
+
+
+def kiosk_stop():
+    p = _display["proc"]
+    if p is not None and p.poll() is None:
+        p.terminate()
+        try:
+            p.wait(5)
+        except subprocess.TimeoutExpired:
+            p.kill()
+            p.wait()
+    _display.update(proc=None, token=None, browser=None)
+
+
+def load_location():
+    try:
+        return {**DEFAULT_LOC, **json.loads(STATE_FILE.read_text())}
+    except (FileNotFoundError, ValueError):
+        return dict(DEFAULT_LOC)
+
+
+def fetch_weather(loc):
+    """Blocking; run in a thread. Returns a compact dict for the weather widget."""
+    q = urllib.parse.urlencode({
+        "latitude": loc["lat"], "longitude": loc["lon"], "timezone": "auto", "forecast_days": 3,
+        "current": "temperature_2m,apparent_temperature,weather_code,wind_speed_10m",
+        "daily": "temperature_2m_max,temperature_2m_min,weather_code",
+        "temperature_unit": "fahrenheit", "wind_speed_unit": "mph"})
+    with urllib.request.urlopen(f"{WEATHER_URL}?{q}", timeout=8) as r:
+        j = json.load(r)
+    cur, d = j["current"], j["daily"]
+    return {"temp": cur["temperature_2m"], "feels": cur["apparent_temperature"],
+            "code": cur["weather_code"], "wind": cur["wind_speed_10m"],
+            "days": [{"date": d["time"][i], "hi": d["temperature_2m_max"][i],
+                      "lo": d["temperature_2m_min"][i], "code": d["weather_code"][i]}
+                     for i in range(len(d["time"]))]}
+
+
+async def get_weather():
+    """Cached 10 min; after a failure retry in 60 s and serve the last good data meanwhile."""
+    loc = load_location()
+    key = (loc["lat"], loc["lon"])
+    now = time.time()
+    if now >= _weather["next"] or _weather["key"] != key:
+        try:
+            data = await asyncio.get_running_loop().run_in_executor(None, fetch_weather, loc)
+            _weather.update(data=data, key=key, next=now + 600, error=None, at=now)
+        except Exception as e:  # network down, bad JSON, API change...
+            _weather["error"] = str(e) or type(e).__name__
+            _weather["next"] = now + 60
+            if _weather["key"] != key:
+                _weather["data"] = None
+            log.warning("weather fetch failed: %s", _weather["error"])
+    return {"location": loc["label"], "data": _weather["data"], "error": _weather["error"],
+            "updated": _weather["at"]}
+
+
+@app.get("/whoami")
+async def whoami(who: Who = Depends(need(None))):
+    return {"name": who.name, "admin": who.admin,
+            "actions": ALL_ACTIONS if who.admin else sorted(who.actions)}
+
+
+@app.get("/display", response_class=FileResponse)
+async def display_page():
+    # Holds no secrets; the page reads its token from the URL fragment.
+    return FileResponse(DISPLAY_DIR / "index.html")
+
+
+@app.get("/display/data")
+async def display_data(who: Who = Depends(need("display_data"))):
+    return {"now": time.time(), "tv": await status(who), "weather": await get_weather()}
+
+
+@app.get("/display/state")
+async def display_state(who: Who = Depends(need(None))):
+    return {"open": kiosk_running(), "browser": _display["browser"],
+            "location": load_location()}
+
+
+@app.post("/display/open")
+async def display_open(tv: bool = Query(True), who: Who = Depends(need("display"))):
+    """Wake the TV, switch it to the Mac's input, and show the dashboard fullscreen."""
+    async with get_lock("display"):
+        return await _display_open(tv)
+
+
+async def _display_open(tv):
+    exe = find_browser()
+    if not exe:
+        raise HTTPException(500, "no kiosk-capable browser found: install Google Chrome, Brave, "
+                                 "Edge or Firefox, or set TV_DISPLAY_BROWSER to its binary")
+    out = {}
+    if tv:
+        try:
+            if await wake_tv(30):
+                out["tv"] = "on"
+                await call("ssap://tv/switchInput", {"inputId": MAC_INPUT})
+                out["input"] = MAC_INPUT
+            else:
+                out["tv"] = "not answering (dashboard opened anyway)"
+        except (TVError, TVUnreachable) as e:
+            out["tv"] = f"problem: {e} (dashboard opened anyway)"
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(None, kiosk_stop)            # replace any running copy
+    RUN_DIR.mkdir(parents=True, exist_ok=True)
+    token = secrets.token_urlsafe(18)                        # fresh, valid only until close
+    url = f"http://{BIND}:{SERVER_PORT}/display#{token}"
+    logf = open(RUN_DIR / "kiosk.log", "ab")
+    proc = subprocess.Popen(browser_cmd(exe, url), stdin=subprocess.DEVNULL,
+                            stdout=logf, stderr=logf)
+    logf.close()
+    _display.update(proc=proc, token=token, browser=os.path.basename(exe))
+    await asyncio.sleep(1.5)
+    if proc.poll() is not None:                              # browser quit straight away
+        code = proc.returncode
+        _display.update(proc=None, token=None, browser=None)
+        raise TVError(f"the browser exited at once (code {code}); see {RUN_DIR / 'kiosk.log'}")
+    out.update(display="open", browser=os.path.basename(exe))
+    return out
+
+
+@app.post("/display/close")
+async def display_close(who: Who = Depends(need("display"))):
+    async with get_lock("display"):
+        was = kiosk_running()
+        await asyncio.get_running_loop().run_in_executor(None, kiosk_stop)
+    return {"display": "closed", "was_open": was}
+
+
+def geocode(place):
+    """'Moab, Utah' -> (lat, lon, 'Moab, Utah'). Blocking; run in a thread."""
+    name, _, hint = place.partition(",")
+    hint = hint.strip().lower()
+    q = urllib.parse.urlencode({"name": name.strip(), "count": 10, "language": "en", "format": "json"})
+    with urllib.request.urlopen(f"{GEOCODE_URL}?{q}", timeout=8) as r:
+        results = json.load(r).get("results") or []
+    if not results:
+        return None
+    def matches(x):
+        fields = [str(x.get(k, "")).lower() for k in ("admin1", "country", "country_code")]
+        return any(hint and (hint == f or hint in f) for f in fields)
+    best = next((x for x in results if matches(x)), results[0])
+    label = ", ".join(v for v in (best.get("name"), best.get("admin1") or best.get("country")) if v)
+    return best["latitude"], best["longitude"], label
+
+
+@app.post("/display/location")
+async def set_location(place: str = Query("", max_length=80),
+                       lat: float = Query(None, ge=-90, le=90), lon: float = Query(None, ge=-180, le=180),
+                       label: str = Query("", max_length=60), who: Who = Depends(need("admin"))):
+    """Where the weather tile looks. The RV moves, so this is a setting, not a constant.
+    Give either place=\"Moab, Utah\" (looked up for you) or lat= and lon=."""
+    if place.strip():
+        try:
+            found = await asyncio.get_running_loop().run_in_executor(None, geocode, place.strip())
+        except Exception as e:
+            raise TVError(f"place lookup failed (is the Mac online?): {e}")
+        if not found:
+            raise HTTPException(404, f"no place found for {place!r}; try 'City, State'")
+        lat, lon, label = found[0], found[1], label or found[2]
+    elif lat is None or lon is None:
+        raise HTTPException(400, "give place=... or both lat= and lon=")
+    loc = {"lat": lat, "lon": lon, "label": label.strip() or f"{lat:.2f}, {lon:.2f}"}
+    fd = os.open(str(STATE_FILE), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        json.dump(loc, f)
+    _weather["next"] = 0.0
+    return loc
+
+
+if DISPLAY_DIR.is_dir():
+    app.mount("/display/static", StaticFiles(directory=str(DISPLAY_DIR)), name="display-static")
+
+
 GUEST_PAGE = """<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -371,34 +624,53 @@ button{padding:18px 8px;font:inherit;font-weight:600;border-radius:12px;border:1
 button:active{background:var(--acc);color:#fff}
 button.on{border-color:var(--acc)}
 button:disabled{opacity:.5}
+[hidden]{display:none!important}
+form{display:flex;gap:8px;margin-bottom:10px}
+input{flex:1;min-width:0;padding:12px;font:inherit;border-radius:12px;border:1px solid var(--line);background:var(--card);color:var(--fg)}
+form button{padding:12px 14px}
+.note{font-size:14px;opacity:.7;margin:0 0 10px}
 </style></head><body>
 <h1>RV TV</h1>
 <div id="st">Checking TV...</div>
 <div class="grid">
- <button class="on" onclick="go('/power/on?wait=30','Waking the TV (up to 30 s)...')">Power on</button>
- <button onclick="go('/power/off','Turning off...')">Power off</button>
+ <button class="on" data-act="power_on" onclick="go('/power/on?wait=30','Waking the TV (up to 30 s)...')">Power on</button>
+ <button data-act="power_off" onclick="go('/power/off','Turning off...')">Power off</button>
 </div>
 <div class="grid">
- <button onclick="go('/app/netflix','Opening Netflix...')">Netflix</button>
- <button onclick="go('/app/amazon','Opening Prime Video...')">Prime Video</button>
- <button onclick="go('/app/youtube.leanback.v4','Opening YouTube...')">YouTube</button>
- <button onclick="go('/input/HDMI_1','Switching to the Mac...')">Mac screen</button>
+ <button data-act="app" onclick="go('/app/netflix','Opening Netflix...')">Netflix</button>
+ <button data-act="app" onclick="go('/app/amazon','Opening Prime Video...')">Prime Video</button>
+ <button data-act="app" onclick="go('/app/youtube.leanback.v4','Opening YouTube...')">YouTube</button>
+ <button data-act="input" onclick="go('/input/HDMI_1','Switching to the Mac...')">Mac screen</button>
 </div>
 <div class="grid">
- <button onclick="go('/volume/down','')">Vol &minus;</button>
- <button onclick="go('/volume/up','')">Vol +</button>
- <button onclick="go('/mute/on','')">Mute</button>
- <button onclick="go('/mute/off','')">Unmute</button>
+ <button data-act="volume" onclick="go('/volume/down','')">Vol &minus;</button>
+ <button data-act="volume" onclick="go('/volume/up','')">Vol +</button>
+ <button data-act="mute" onclick="go('/mute/on','')">Mute</button>
+ <button data-act="mute" onclick="go('/mute/off','')">Unmute</button>
 </div>
+<div class="grid">
+ <button class="on" data-act="display" onclick="go('/display/open','Waking the TV and opening the dashboard (up to 40 s)...')">Show dashboard</button>
+ <button data-act="display" onclick="go('/display/close','Closing the dashboard...')">Close dashboard</button>
+</div>
+<form data-act="admin" onsubmit="setPlace(event)">
+ <input id="place" placeholder="Weather place, e.g. Moab, Utah" autocomplete="off">
+ <button>Set</button>
+</form>
 <script>
 var T=location.hash.slice(1);
 try{if(T){localStorage.setItem('tvtok',T)}else{T=localStorage.getItem('tvtok')||''}}catch(e){}
-var st=document.getElementById('st');
+var st=document.getElementById('st'), ME=null;
 function show(t){st.textContent=t}
 async function api(method,path){
   var r=await fetch(path,{method:method,headers:{Authorization:'Bearer '+T}});
   var j={};try{j=await r.json()}catch(e){}
   return {ok:r.ok,status:r.status,j:j};
+}
+function can(a){return ME&&(ME.admin||ME.actions.indexOf(a)>=0)}
+function applyPerms(){
+  document.querySelectorAll('[data-act]').forEach(function(e){e.hidden=!can(e.dataset.act)});
+  document.querySelectorAll('.grid').forEach(function(g){
+    g.hidden=!Array.prototype.some.call(g.children,function(c){return !c.hidden})});
 }
 async function go(path,msg){
   if(msg)show(msg);
@@ -412,14 +684,37 @@ async function go(path,msg){
   }catch(e){show('Cannot reach the TV box. Are you on the RV Wi-Fi?');return}
   setTimeout(refresh,1500);
 }
+async function setPlace(ev){
+  ev.preventDefault();
+  var p=document.getElementById('place').value.trim();
+  if(!p)return;
+  show('Looking up '+p+'...');
+  try{
+    var r=await api('POST','/display/location?place='+encodeURIComponent(p));
+    if(!r.ok){show(r.j.detail||('Could not set the place ('+r.status+')'));return}
+    show('Weather place set to '+r.j.label);
+    document.getElementById('place').value='';
+  }catch(e){show('Cannot reach the TV box.')}
+}
 async function refresh(){
   try{
+    if(!ME){
+      var w=await api('GET','/whoami');
+      if(w.status==401){show('This link is not valid any more. Ask Devon for a new one.');return}
+      if(!w.ok){show('Status unavailable');return}
+      ME=w.j;applyPerms();
+    }
     var r=await api('GET','/status');
     if(r.status==401){show('This link is not valid any more. Ask Devon for a new one.');return}
     if(!r.ok){show('Status unavailable');return}
-    var j=r.j;
-    if(j.power!='on'){show('TV is off');return}
-    show('TV is on'+(j.volume!=null?' - volume '+j.volume:'')+(j.muted?' (muted)':''));
+    var j=r.j, line;
+    if(j.power!='on'){line='TV is off'}
+    else{line='TV is on'+(j.volume!=null?' - volume '+j.volume:'')+(j.muted?' (muted)':'')}
+    if(can('display')){
+      var d=await api('GET','/display/state');
+      if(d.ok&&d.j.open)line+=' - dashboard open';
+    }
+    show(line);
   }catch(e){show('Cannot reach the TV box. Are you on the RV Wi-Fi?')}
 }
 refresh();setInterval(refresh,15000);
@@ -454,8 +749,11 @@ def token_cmd(args):
         if name in data:
             sys.exit(f"{name} already exists (revoke it first to rotate)")
         rec = {"token": secrets.token_urlsafe(24)}
-        if "--no-off" in args:
-            rec["actions"] = [a for a in GUEST_ACTIONS if a != "power_off"]
+        acts = [a for a in GUEST_ACTIONS if not ("--no-off" in args and a == "power_off")]
+        if "--display" in args:
+            acts.append("display")      # may open and close the dashboard on the Mac
+        if acts != GUEST_ACTIONS:
+            rec["actions"] = acts
         data[name] = rec
         save_tokens(data)
         print(f"Added {name}. Send them this link:\n  {base_url()}/guest#{rec['token']}")
@@ -473,7 +771,7 @@ def token_cmd(args):
     elif cmd == "link" and len(args) >= 2 and args[1] in data:
         print(f"{base_url()}/guest#{data[args[1]]['token']}")
     else:
-        sys.exit("usage: tvserver.py token add NAME [--no-off] | revoke NAME | list | link NAME")
+        sys.exit("usage: tvserver.py token add NAME [--no-off] [--display] | revoke NAME | list | link NAME")
 
 
 if __name__ == "__main__":
