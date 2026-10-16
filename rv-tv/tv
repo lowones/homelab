@@ -4,6 +4,7 @@
 #   export TV_URL=http://neverland:8780 TV_TOKEN=...
 # Usage: tv on | off | status | inputs | apps | input HDMI_1 | volume 15|up|down
 #        tv mute on|off | app youtube.leanback.v4
+#        tv display open|close|state | tv place "Moab, Utah"
 set -euo pipefail
 ENVF="${TV_ENV:-$(cd "$(dirname "$0")" && pwd)/tv.env}"
 if [ -f "$ENVF" ]; then set -a; . "$ENVF"; set +a; fi
@@ -22,5 +23,7 @@ case "${1:-}" in
   volume)  req POST "/volume/${2:?number 0-100, or up/down}" ;;
   mute)    req POST "/mute/${2:?on or off}" ;;
   app)     req POST "/app/${2:?app id}" ;;
-  *) sed -n '2,8p' "$0"; exit 1 ;;
+  display) case "${2:-}" in open|close) req POST "/display/$2" ;; state) req GET /display/state ;; *) echo "usage: tv display open|close|state"; exit 1 ;; esac ;;
+  place)   req POST "/display/location?place=$(python3 -c 'import sys,urllib.parse as u;print(u.quote(sys.argv[1]))' "${2:?e.g. \"Moab, Utah\"}")" ;;
+  *) sed -n '2,9p' "$0"; exit 1 ;;
 esac

@@ -1,24 +1,47 @@
 #!/bin/bash
-# Self-contained check of the access rules and guest page against a fake TV.
+# Self-contained check of the access rules, guest page and dashboard against a fake TV,
+# a fake weather service and a fake browser.
 # Uses its own temp dir and ports; never touches the real TV or prod files.
 #   bash tests/smoke.sh      (needs rv-tv/.venv from install-tvserver.sh)
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 PY="$HERE/.venv/bin/python"; [ -x "$PY" ] || PY=python3
-T=$(mktemp -d); MOCK_PORT=3198; API_PORT=8798
-cleanup() { [ -n "${P1:-}" ] && kill $P1 2>/dev/null; [ -n "${P2:-}" ] && kill $P2 2>/dev/null; rm -rf "$T"; }
+T=$(mktemp -d); MOCK_PORT=3198; API_PORT=8798; STUB_PORT=8799
+cleanup() { for p in ${P1:-} ${P2:-} ${P3:-}; do kill $p 2>/dev/null; done; rm -rf "$T"; }
 trap cleanup EXIT
 openssl req -x509 -newkey rsa:2048 -nodes -days 2 -subj /CN=mock -keyout $T/mock.key -out $T/mock.crt 2>/dev/null
 echo mockkey123 > $T/key.txt   # the key the fake TV accepts
+# fake weather + place lookup (plain files served over http), and a fake "browser" that
+# records its arguments and then idles, standing in for Chrome in kiosk mode
+mkdir -p $T/stub/v1
+$PY - "$T/stub/v1" <<'EOF'
+import json, sys
+d = sys.argv[1]
+json.dump({"current": {"temperature_2m": 54.3, "apparent_temperature": 50.8, "weather_code": 2, "wind_speed_10m": 8.4},
+           "daily": {"time": ["2026-10-15", "2026-10-16", "2026-10-17"], "temperature_2m_max": [58.1, 61.0, 49.5],
+                     "temperature_2m_min": [44.2, 46.9, 38.0], "weather_code": [2, 61, 71]}}, open(d + "/forecast", "w"))
+json.dump({"results": [{"name": "Moab", "admin1": "Utah", "country": "United States", "country_code": "US", "latitude": 38.57, "longitude": -109.55},
+                       {"name": "Moab", "admin1": "Elsewhere", "country": "X", "country_code": "XX", "latitude": 1, "longitude": 2}]}, open(d + "/search", "w"))
+EOF
+$PY -m http.server $STUB_PORT --bind 127.0.0.1 --directory $T/stub > $T/stub.log 2>&1 & P3=$!
+printf '#!/bin/bash\nprintf "%%s\\n" "$@" > "%s/browser.args"\nexec sleep 300\n' "$T" > $T/fakebrowser
+chmod +x $T/fakebrowser
 MOCK_CERT_DIR=$T $PY "$HERE/tests/mocktv.py" $MOCK_PORT > $T/mock.log 2>&1 & P1=$!
 export TV_ENV_FILE=$T/none.env TV_TOKENS_FILE=$T/tokens.json TV_KEYFILE=$T/key.txt \
-       TV_IP=127.0.0.1 TV_WS_PORT=$MOCK_PORT TV_TOKEN=admintok TV_BIND=127.0.0.1 TV_SERVER_PORT=$API_PORT
+       TV_IP=127.0.0.1 TV_WS_PORT=$MOCK_PORT TV_TOKEN=admintok TV_BIND=127.0.0.1 TV_SERVER_PORT=$API_PORT \
+       TV_DISPLAY_FILE=$T/display.json TV_WEATHER_URL=http://127.0.0.1:$STUB_PORT/v1/forecast \
+       TV_GEOCODE_URL=http://127.0.0.1:$STUB_PORT/v1/search TV_DISPLAY_BROWSER=$T/fakebrowser
 $PY "$HERE/tvserver.py" > $T/server.log 2>&1 & P2=$!
 for i in $(seq 1 30); do curl -fs http://127.0.0.1:$API_PORT/health >/dev/null 2>&1 && break; sleep 0.3; done
 B=http://127.0.0.1:$API_PORT
 G=$($PY "$HERE/tvserver.py" token add guest | tail -1 | sed 's/.*#//')
 N=$($PY "$HERE/tvserver.py" token add nooff --no-off | tail -1 | sed 's/.*#//')
+D=$($PY "$HERE/tvserver.py" token add shower --display | tail -1 | sed 's/.*#//')
 fail=0
+body() { # name pattern curl-args...  (response body must contain the pattern)
+  out=$(curl -s "${@:3}")
+  case "$out" in *"$2"*) echo "ok   $1";; *) echo "FAIL $1 (no '$2' in: ${out:0:120})"; fail=1;; esac
+}
 chk() { # name expected curl-args...
   got=$(curl -s -o /dev/null -w '%{http_code}' "${@:3}")
   if [ "$got" = "$2" ]; then echo "ok   $1"; else echo "FAIL $1 (want $2, got $got)"; fail=1; fi
@@ -40,6 +63,58 @@ chk "guest volume"                    200 -X POST -H "$A $G" $B/volume/20
 chk "guest mute"                      200 -X POST -H "$A $G" $B/mute/on
 chk "nooff guest cannot power off"    403 -X POST -H "$A $N" $B/power/off
 chk "guest can power off"             200 -X POST -H "$A $G" $B/power/off
+
+echo "-- who am I, and what may I do"
+body "whoami admin"                   '"admin":true'          -H "$A admintok" $B/whoami
+body "whoami guest lacks display"     '"actions"'             -H "$A $G" $B/whoami
+out=$(curl -s -H "$A $G" $B/whoami); case "$out" in *display*) echo "FAIL guest whoami lists display"; fail=1;; *) echo "ok   guest is not offered display";; esac
+chk "whoami needs a token"            401 $B/whoami
+
+echo "-- dashboard page, data and weather"
+chk "display page needs no auth"      200 $B/display
+chk "display static file"             200 $B/display/static/layout.json
+chk "display data needs a token"      401 $B/display/data
+body "display data has weather"       '"temp":54.3'           -H "$A admintok" $B/display/data
+body "display data has tv state"      '"power":"on"'          -H "$A admintok" $B/display/data
+chk "guest cannot read display data"  403 -H "$A $G" $B/display/data
+body "default weather place"          'Lansing, MI'           -H "$A admintok" $B/display/data
+
+echo "-- weather place"
+chk "guest cannot set place"          403 -X POST -H "$A $G" "$B/display/location?place=Moab"
+body "set place by name"              '"label":"Moab, Utah"'  -X POST -H "$A admintok" "$B/display/location?place=Moab,%20Utah"
+body "place now used by weather"      'Moab, Utah'            -H "$A admintok" $B/display/data
+body "set place by coordinates"       '"lat":10.5'            -X POST -H "$A admintok" "$B/display/location?lat=10.5&lon=20.25&label=Test"
+chk "place needs a place or coords"   400 -X POST -H "$A admintok" "$B/display/location"
+chk "bad latitude rejected"           422 -X POST -H "$A admintok" "$B/display/location?lat=999&lon=0"
+
+echo "-- open and close the dashboard"
+chk "guest cannot open dashboard"     403 -X POST -H "$A $G" $B/display/open
+chk "guest cannot close dashboard"    403 -X POST -H "$A $G" $B/display/close
+body "state starts closed"            '"open":false'          -H "$A admintok" $B/display/state
+n0=$(grep -c 'tv/switchInput' $T/mock.log)
+body "admin opens dashboard"          '"input":"HDMI_1"'      -X POST -H "$A admintok" $B/display/open
+n1=$(grep -c 'tv/switchInput' $T/mock.log)
+if [ "$n1" -gt "$n0" ]; then echo "ok   open switched the tv to the mac input"; else echo "FAIL open did not switch the input"; fail=1; fi
+body "state is open"                  '"open":true'           -H "$A admintok" $B/display/state
+URL=$(tail -1 $T/browser.args); KT=${URL#*#}
+case "$URL" in http://127.0.0.1:$API_PORT/display#*) echo "ok   browser got the dashboard url";; *) echo "FAIL browser url: $URL"; fail=1;; esac
+chk "kiosk token reads display data"  200 -H "$A $KT" $B/display/data
+chk "kiosk token cannot control tv"   403 -X POST -H "$A $KT" $B/power/off
+chk "kiosk token cannot read status"  403 -H "$A $KT" $B/status
+body "display guest may open"         '"display":"open"'      -X POST -H "$A $D" "$B/display/open?tv=false"
+body "admin closes dashboard"         '"display":"closed"'    -X POST -H "$A admintok" $B/display/close
+body "state is closed again"          '"open":false'          -H "$A admintok" $B/display/state
+chk "kiosk token dies on close"       401 -H "$A $KT" $B/display/data
+body "close when closed is fine"      '"was_open":false'      -X POST -H "$A admintok" $B/display/close
+
+echo "-- concurrent requests (guest page and dashboard polling at once)"
+pids=""; : > $T/par.txt
+for i in 1 2 3 4 5 6 7 8; do
+  curl -s -o /dev/null -w '%{http_code}\n' -H "$A admintok" $B/status >> $T/par.txt & pids="$pids $!"
+done
+wait $pids
+if [ "$(grep -c '^200$' $T/par.txt)" = "8" ]; then echo "ok   8 parallel status calls all answered"; else echo "FAIL parallel calls: $(sort $T/par.txt | uniq -c | tr '\n' ' ')"; fail=1; fi
+
 $PY "$HERE/tvserver.py" token revoke guest >/dev/null
 chk "revoked guest rejected"          401 -H "$A $G" $B/status
 chk "other guest unaffected"          200 -H "$A $N" $B/status

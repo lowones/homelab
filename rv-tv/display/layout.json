@@ -1,0 +1,7 @@
+{
+  "widgets": [
+    {"id": "clock",   "span": 7},
+    {"id": "weather", "span": 5},
+    {"id": "tv",      "span": 12}
+  ]
+}

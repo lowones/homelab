@@ -7,12 +7,33 @@ FastAPI over Tailscale, bearer-token auth, a phone-friendly guest page, Wake-on-
 - `tvserver.py` the service (`python tvserver.py pair` to pair; `token add|revoke|list|link` for guests)
 - `tv` command-line wrapper (`./tv status`, `./tv on`, `./tv input HDMI_1`)
 - `install-tvserver.sh` venv, `tv.env`, launchd agent `com.lowone.tvserver` (prod, port 8780)
+- `display/` the dashboard shown on the TV (`index.html`, `display.css`, `display.js`, `layout.json`, `widgets/*.js`)
 - `run-dev.sh` dev instance on port 8781 (`bash run-dev.sh mock` = fake TV)
 - `tests/smoke.sh` access-rule checks against a fake TV; `tests/mocktv.py` the fake TV
 - `migrate-from-tvtest.sh` one-time move of prod from `~/dev/tvtest`
 
-Never committed (see `.gitignore`): `tv.env`, `tv_key.txt`, `tokens.json`, `.venv`.
+Never committed (see `.gitignore`): `tv.env`, `tv_key.txt`, `tokens.json`, `display.json`, `.venv`, `.run/`.
 Treat the token and guest links like passwords.
+
+## Dashboard on the TV
+One tap on the control page (`/guest#<token>`, buttons only shown if your token may use them) runs
+`POST /display/open`: wake the TV, switch it to `TV_MAC_INPUT` (HDMI_1), and open a fullscreen
+browser window on the Mac pointed at `/display`. `POST /display/close` closes it again.
+- Needs Google Chrome, Brave, Edge or Firefox on the Mac (kiosk mode). Set `TV_DISPLAY_BROWSER` in
+  `tv.env` to pick one. The window uses its own profile in `.run/`, so your normal browser is untouched.
+- The Mac must be logged in and unlocked, or the window cannot appear.
+- Who may press it: admin only by default. Give a guest the button with
+  `python tvserver.py token add NAME --display`.
+- The page reads a short-lived token that exists only while the dashboard is open; it can read
+  `/display/data` and nothing else. Restarting the service closes the dashboard.
+- The caller never supplies a URL or command: the page and browser are fixed in the service.
+- Preview from any device: open `/display#<admin token>`.
+- Weather (Open-Meteo, no key) is cached 10 min and fetched by the Mac. Set the place with
+  `./tv place "Moab, Utah"` or the box on the control page (admin). Default is Lansing, MI.
+- Add a widget: drop `display/widgets/<id>.js` exporting `{init, render(el, data), tick(el)}` and
+  list `{"id": "<id>", "span": N}` in `display/layout.json` (12-column grid). `data` is the JSON from
+  `/display/data` (`tv`, `weather`, `now`); add fields there in `tvserver.py` for new data sources.
+- CLI: `./tv display open|close|state`, `./tv place "City, State"`.
 
 ## Workflow
 1. `git switch -c my-feature`
@@ -25,7 +46,8 @@ Treat the token and guest links like passwords.
 ## Facts
 TV `192.168.1.201` (DHCP lease, not reserved), MAC `ec:31:11:a2:e5:16`. HDMI_1 = the mini.
 Mini `pmset displaysleep` must be 0 or the TV loses signal and powers itself off.
-Guests: On/Off, Netflix, Prime, YouTube, Mac input, volume (see `GUEST_*` in `tvserver.py`).
+Guests: On/Off, Netflix, Prime, YouTube, Mac input, volume (see `GUEST_*` in `tvserver.py`); the dashboard button is opt-in.
+The mini runs the macOS Command Line Tools Python 3.9: keep the code 3.9-compatible.
 
 ## Gotchas
 - Re-running `install-tvserver.sh` restarts the service (a few seconds of downtime). It waits for the
