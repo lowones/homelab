@@ -1,5 +1,5 @@
 ---
-- name: Deploy iTerm2 per-host tab colouring
+- name: Deploy per-host tab marker (title everywhere, real colour in iTerm2)
   hosts: tabcolor
   gather_facts: true
   roles:

@@ -1,42 +1,61 @@
 # {{ ansible_managed }}
-# Source: lowones/homelab -> ansible/roles/tabcolor
-# Sets the iTerm2 tab colour to identify this host. Do not edit in place.
+# Source: lowones/homelab -> ansible/tabcolor
+# Marks this host so terminal tabs can be told apart. Do not edit in place.
+#   every terminal: tab/window title "<coloured square> <host>"   (OSC 2)
+#   iTerm2 only:    the real tab colour                           (OSC 6)
+# The title marker is what Ghostty and other terminals without per-tab colour
+# can show; it also travels over ssh like the colour does.
 
 # Interactive shells only.
 case $- in *i*) ;; *) return ;; esac
 
-# iTerm2 only. Termius, the Proxmox console, cron, and plain TTYs skip this
-# rather than printing escape codes as literal garbage.
-[ "${LC_TERMINAL:-}" = "iTerm2" ] || return
-
 # Never emit into a pipe or a command substitution.
 [ -t 1 ] || return
 
+# Consoles that cannot show a title would print the escape codes as garbage.
+case "${TERM:-dumb}" in linux|dumb|vt100|vt220) return ;; esac
+
 if [ "$(id -u)" = "0" ]; then
     TC_R={{ tab_color_root.r }}; TC_G={{ tab_color_root.g }}; TC_B={{ tab_color_root.b }}
+    TC_MARK="{{ tab_emoji_root }} root@{{ inventory_hostname }}"
 else
     TC_R={{ tab_color.r }}; TC_G={{ tab_color.g }}; TC_B={{ tab_color.b }}
+    TC_MARK="{{ tab_emoji }} {{ inventory_hostname }}"
 fi
 
 # tmux swallows OSC unless wrapped in a DCS passthrough envelope, with every
 # inner ESC doubled. Requires 'allow-passthrough on' for tmux >= 3.3.
-_tab_osc() {
+_tab_seq() {
     if [ -n "${TMUX:-}" ]; then
-        printf '\033Ptmux;\033\033]6;1;bg;%s;brightness;%s\a\033\\' "$1" "$2"
+        printf '\033Ptmux;\033\033]%s\a\033\\' "$1"
     else
-        printf '\033]6;1;bg;%s;brightness;%s\a' "$1" "$2"
+        printf '\033]%s\a' "$1"
     fi
 }
 
 _tabcolor() {
-    _tab_osc red   "$TC_R"
-    _tab_osc green "$TC_G"
-    _tab_osc blue  "$TC_B"
+    # Debian/Ubuntu's default PS1 sets its own title ("user@host: dir") AFTER
+    # PROMPT_COMMAND runs, which would overwrite the marker. Appending the
+    # sequence to PS1 puts ours last. Done once, at the first prompt, so it
+    # runs after .bashrc has set PS1.
+    if [ -z "${_TC_PS1_DONE:-}" ]; then
+        _TC_PS1_DONE=1
+        if [ -n "${PS1:-}" ]; then
+            PS1="${PS1}\[$(_tab_seq "2;${TC_MARK}")\]"
+        fi
+    fi
+    _tab_seq "2;${TC_MARK}"
+
+    # Real tab colour: iTerm2 only (proprietary sequence).
+    [ "${LC_TERMINAL:-}" = "iTerm2" ] || return 0
+    _tab_seq "6;1;bg;red;brightness;$TC_R"
+    _tab_seq "6;1;bg;green;brightness;$TC_G"
+    _tab_seq "6;1;bg;blue;brightness;$TC_B"
 }
 
 # Repaint before every prompt rather than once on connect. This is what makes
 # nested hops self-healing: exiting an inner session repaints the outer host's
-# colour automatically, where a reset-on-exit would clear to default instead.
+# marker automatically, where a reset-on-exit would clear to default instead.
 # Guarded so nested sourcing (sudo -i) can't stack duplicates.
 case "${PROMPT_COMMAND:-}" in
     *_tabcolor*) ;;
