@@ -1,0 +1,26 @@
+#!/bin/bash
+# tv - command line for the RV TV service.
+# On the mini it reads tv.env next to this script. From another machine set TV_URL and TV_TOKEN:
+#   export TV_URL=http://neverland:8780 TV_TOKEN=...
+# Usage: tv on | off | status | inputs | apps | input HDMI_1 | volume 15|up|down
+#        tv mute on|off | app youtube.leanback.v4
+set -euo pipefail
+ENVF="${TV_ENV:-$(cd "$(dirname "$0")" && pwd)/tv.env}"
+if [ -f "$ENVF" ]; then set -a; . "$ENVF"; set +a; fi
+URL="${TV_URL:-http://${TV_BIND:-127.0.0.1}:${TV_SERVER_PORT:-8780}}"
+TOKEN="${TV_TOKEN:?TV_TOKEN not set (no tv.env found)}"
+
+req() { curl -fsS --max-time 150 -X "$1" -H "Authorization: Bearer $TOKEN" "$URL$2"; echo; }
+
+case "${1:-}" in
+  on)      req POST /power/on ;;
+  off)     req POST /power/off ;;
+  status)  req GET /status ;;
+  inputs)  req GET /inputs ;;
+  apps)    req GET /apps ;;
+  input)   req POST "/input/${2:?input id, e.g. HDMI_1}" ;;
+  volume)  req POST "/volume/${2:?number 0-100, or up/down}" ;;
+  mute)    req POST "/mute/${2:?on or off}" ;;
+  app)     req POST "/app/${2:?app id}" ;;
+  *) sed -n '2,8p' "$0"; exit 1 ;;
+esac
