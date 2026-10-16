@@ -31,6 +31,8 @@ export default {
     el.replaceChildren();
     add(el, 'div', 'wx-place', w.location);
     if (w.source === 'itinerary') add(el, 'div', 'wx-sub', 'From the trip schedule');
+    if (w.source === 'device') add(el, 'div', 'wx-sub', "From this Mac's location");
+    if (w.schedule) add(el, 'div', 'wx-sub', 'Schedule says ' + w.schedule);
     if (!w.data) {
       add(el, 'div', 'wx-error', 'Weather unavailable');
       add(el, 'div', 'wx-sub', 'The Mac needs internet to fetch it. Trying again soon.');

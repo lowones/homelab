@@ -88,6 +88,42 @@ if ! launchctl bootstrap "$DOMAIN" "$PLIST" 2>/dev/null; then
 fi
 echo "[4/4] service loaded"
 
+# Location agent: refreshes .run/location.raw every 10 min from CoreLocationCLI so the weather
+# follows the Mac's own position. Needs:  brew install --cask corelocationcli  and
+# System Settings > Privacy & Security > Location Services > allow CoreLocationCLI.
+if command -v CoreLocationCLI >/dev/null 2>&1 || [ -x /opt/homebrew/bin/CoreLocationCLI ]; then
+  LLABEL=com.lowone.tvlocation
+  LPLIST="$HOME/Library/LaunchAgents/$LLABEL.plist"
+  mkdir -p "$DIR/.run"
+  chmod +x "$DIR/locationagent.sh"
+  cat > "$LPLIST" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>$LLABEL</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>$DIR/locationagent.sh</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>StartInterval</key><integer>600</integer>
+  <key>StandardOutPath</key><string>$DIR/.run/locationagent.log</string>
+  <key>StandardErrorPath</key><string>$DIR/.run/locationagent.log</string>
+</dict>
+</plist>
+EOF
+  plutil -lint "$LPLIST" >/dev/null
+  launchctl bootout "$DOMAIN/$LLABEL" 2>/dev/null || true
+  sleep 1
+  launchctl bootstrap "$DOMAIN" "$LPLIST" \
+    && echo "     location agent loaded (writes $DIR/.run/location.raw)" \
+    || echo "     WARNING: could not load $LLABEL; weather will follow the schedule only"
+else
+  echo "     CoreLocationCLI not found: weather follows the schedule (brew install --cask corelocationcli to use the Mac's location)"
+fi
+
 set -a; . ./tv.env; set +a
 sleep 3
 echo
