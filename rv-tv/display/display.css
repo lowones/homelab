@@ -10,6 +10,8 @@
   --rule: rgba(246, 239, 227, .22);
   --signal: #ffb02e;
   --target: #27c4b4;
+  --tide: #86cbff;        /* tide times and heights */
+  --tide-now: #5fe28f;    /* the tide that is next */
 }
 html { font-size: calc(100vw / 80); }
 body {
@@ -93,7 +95,7 @@ body {
 .wx-side { display: flex; flex-direction: column; gap: .12rem; min-width: 0; }
 .wx-desc { font-size: 1.9rem; }
 .wx-sub { font-size: 1.35rem; color: var(--ink-dim); }
-.wx-sun { font-size: 1.45rem; margin-top: .25rem; white-space: nowrap; }
+.wx-sun { font-size: 1.45rem; margin-top: .25rem; white-space: nowrap; color: var(--signal); }
 .wx-sun .k { color: var(--ink-dim); margin-right: .35rem; }
 .wx-sun .gap { display: inline-block; width: 1.2rem; }
 .wx-days { list-style: none; margin: .7rem 0 0; padding: 0; font-size: 1.6rem; }
@@ -105,27 +107,26 @@ body {
 .wx-error { font-size: 1.5rem; color: var(--signal); }
 .wx-tides { margin-top: .6rem; padding-top: .5rem; border-top: .1rem solid var(--rule); }
 .wx-tides h3 { display: flex; justify-content: space-between; align-items: baseline; gap: 1.2rem;
-  margin: 0 0 .35rem; font-size: 1.1rem; font-weight: 500; color: var(--ink-dim); }
+  margin: 0 0 .35rem; font-size: 1.1rem; font-weight: 500; color: var(--tide); }
 .wx-tides h3 .l { letter-spacing: .09em; text-transform: uppercase; white-space: nowrap; }
 .wx-tides h3 .r { font-size: 1.2rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 .tide-list { display: grid; grid-template-columns: 1fr 1fr; gap: .2rem 1.4rem; font-size: 1.5rem; }
-.tide { display: flex; align-items: baseline; gap: .55rem; white-space: nowrap; }
-.tide .ar { width: 1rem; color: var(--ink-dim); }
+.tide { display: flex; align-items: baseline; gap: .55rem; white-space: nowrap; color: var(--tide); }
+.tide .ar { width: 1rem; color: var(--tide); }
 .tide .when { font-weight: 600; }
-.tide .ht { color: var(--ink-dim); }
+.tide .ht { color: var(--tide); }
 .tide.past { opacity: .42; }
-.tide.next { color: var(--signal); }
-.tide.next .ar, .tide.next .ht { color: var(--signal); }
+.tide.next, .tide.next .ar, .tide.next .ht { color: var(--tide-now); }
 
 /* ---- clock: small on purpose ----------------------------------------------------- */
-.widget-clock { align-self: end; display: flex; align-items: baseline; gap: 1rem; color: var(--ink-dim); }
+.widget-clock { align-self: end; display: flex; align-items: baseline; justify-content: flex-end; gap: 1.1rem; color: var(--ink-dim); }
 .clock-time { font-size: 1.7rem; line-height: 1; font-weight: 600; font-variant-numeric: tabular-nums;
   white-space: nowrap; color: var(--ink); }
 .clock-time .ap { font-size: 1.15rem; font-weight: 500; margin-left: .4rem; color: var(--ink-dim); }
 .clock-date { font-size: 1.4rem; margin: 0; }
 
 /* TV strip along the bottom of the right half */
-.widget-tv { align-self: end; display: flex; align-items: center; gap: 2.4rem;
+.widget-tv { align-self: end; display: flex; align-items: center; justify-content: flex-end; gap: 2.4rem;
   font-size: 1.3rem; color: var(--ink-dim); }
 .widget-tv .dot { display: inline-block; width: .8rem; height: .8rem; border-radius: 50%;
   margin-right: .6rem; background: rgba(246, 239, 227, .4); vertical-align: .05rem; }

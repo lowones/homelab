@@ -3,8 +3,8 @@ const date = new Intl.DateTimeFormat([], { weekday: 'long', month: 'long', day: 
 
 export default {
   init(el) {
-    el.innerHTML = '<div class="clock-time"><span class="hm"></span><span class="ap"></span></div>' +
-                   '<div class="clock-date"></div>';
+    el.innerHTML = '<div class="clock-date"></div>' +                    // "Friday, October 16", then the time, at the right edge
+                   '<div class="clock-time"><span class="hm"></span><span class="ap"></span></div>';
     this.tick(el);
   },
   tick(el) {
