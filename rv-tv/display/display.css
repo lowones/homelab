@@ -61,8 +61,8 @@ body {
 .leaflet-control-attribution a { color: #fff !important; }
 .leaflet-control-scale-line { font-size: .85rem; border-color: #fff; color: #fff; background: rgba(0, 0, 0, .35);
   text-shadow: 0 0 .2rem #000; }
-.hike-pin { background: none; border: 0; }
-.hike-pin svg { display: block; filter: drop-shadow(0 .1rem .1rem rgba(0, 0, 0, .55)); }
+.hike-pin, .poi-pin { background: none; border: 0; }
+.hike-pin svg, .poi-pin svg { display: block; filter: drop-shadow(0 .1rem .1rem rgba(0, 0, 0, .55)); }
 .widget-map .marker-cluster-small, .widget-map .marker-cluster-medium, .widget-map .marker-cluster-large {
   background: rgba(225, 29, 46, .35); }
 .widget-map .marker-cluster-small div, .widget-map .marker-cluster-medium div, .widget-map .marker-cluster-large div {

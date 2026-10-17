@@ -196,6 +196,55 @@ body "state shows the camera window open"  '"batcam":true' -H "$A admintok" $B7/
 body "close screen removes it"             '"batcam_closed":true' -X POST -H "$A admintok" $B7/display/close
 body "default live camera is the driveway" '"id":"driveway","label":"Driveway","live":true' -H "$A admintok" $B/display/state
 
+echo "-- map pins: post offices, libraries, Costco"
+cat > $T/poi_test.py <<'PYEOF'
+import json, sys, threading, http.server
+sys.path.insert(0, sys.argv[1])
+fake = {"elements": [
+  {"type": "node", "lat": 42.730, "lon": -84.550, "tags": {"amenity": "post_office"}},
+  {"type": "way", "center": {"lat": 42.73001, "lon": -84.55001}, "tags": {"amenity": "post_office"}},   # same place: merged
+  {"type": "node", "lat": 42.800, "lon": -84.600, "tags": {"amenity": "post_office"}},
+  {"type": "node", "lat": 42.740, "lon": -84.560, "tags": {"amenity": "library"}},
+  {"type": "node", "lat": 42.741, "lon": -84.561, "tags": {"amenity": "library", "access": "private"}},  # skipped
+  {"type": "way", "center": {"lat": 42.780, "lon": -84.480}, "tags": {"shop": "wholesale", "name": "Costco Wholesale"}},
+  {"type": "node", "lat": 42.781, "lon": -84.481, "tags": {"amenity": "fuel", "brand": "Costco", "name": "Costco Gas"}},  # gas: skipped
+  {"type": "node", "lat": 42.9, "lon": -84.4, "tags": {"shop": "supermarket", "name": "Meijer"}}]}   # not ours
+class H(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.server.last = self.path
+        b = json.dumps(fake).encode()
+        self.send_response(200); self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(b))); self.end_headers(); self.wfile.write(b)
+    def log_message(self, *a): pass
+srv = http.server.HTTPServer(("127.0.0.1", int(sys.argv[2])), H)
+threading.Thread(target=srv.serve_forever, daemon=True).start()
+import os
+os.environ["TV_OVERPASS_URL"] = "http://127.0.0.1:%s/api" % sys.argv[2]
+import tvserver as t
+items = t.poi_job(42.73, -84.55, 50)
+kinds = sorted(i["t"] for i in items)
+assert kinds == ["costco", "library", "post", "post"], kinds
+assert [i["t"] for i in items][:2] == ["post", "post"] and items[0]["lat"] == 42.73, items   # nearest first
+assert "post_office" in srv.last and "Costco" in srv.last and "Q715583" in srv.last, srv.last
+q = t.poi_query(42.73, -84.55, 50)
+assert q.startswith("[out:json]") and q.count("(") >= 6
+print("poi backend ok")
+PYEOF
+if $PY $T/poi_test.py "$HERE" 8793 > $T/poi.out 2>&1; then echo "ok   Overpass answer parsed (kinds, merged duplicates, skipped gas and private)"; else echo "FAIL pins backend"; cat $T/poi.out; fail=1; fi
+cat > $T/poi_test.mjs <<'JSEOF'
+import { pickPoi } from './map.mjs';
+const items = [];
+for (let i = 1; i <= 8; i++) items.push({ t: 'post', lat: 42.73 + i * 0.01, lon: -84.55 });    // 8 post offices going north
+items.push({ t: 'costco', lat: 42.60, lon: -84.55 }, { t: 'library', lat: 42.74, lon: -84.56 });
+const bounds = { contains: ([la]) => la > 42.70 && la < 42.80 };                                  // costco (42.60) is outside the picture
+const got = pickPoi(items, bounds, [42.73, -84.55], 3);
+const posts = got.filter(p => p.t === 'post').map(p => p.lat);
+const ok = posts.length === 3 && Math.abs(posts[0] - 42.74) < 1e-9 && !got.some(p => p.t === 'costco') && got.some(p => p.t === 'library');
+console.log(ok ? 'pick ok' : 'pick BAD ' + JSON.stringify(got)); process.exit(ok ? 0 : 1);
+JSEOF
+cp "$HERE/display/widgets/map.js" $T/map.mjs
+if node $T/poi_test.mjs > $T/poipick.out 2>&1; then echo "ok   map keeps only the nearest few of each kind inside the view"; else echo "FAIL pin picking (needs node)"; cat $T/poipick.out; fail=1; fi
+
 echo "-- concurrent requests (guest page and dashboard polling at once)"
 pids=""; : > $T/par.txt
 for i in 1 2 3 4 5 6 7 8; do

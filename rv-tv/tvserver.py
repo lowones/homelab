@@ -1193,6 +1193,90 @@ async def get_tides():
     return {**value, "error": error, "updated": at}
 
 
+# ---- map pins: post offices, libraries, Costco (OpenStreetMap via Overpass) --------------
+# The server asks for every one near the Mac once (cached a day, background thread, last good
+# answer kept when Starlink drops). The map page then keeps only the nearest few of each kind
+# that are actually inside the picture. TV_POI=off turns it off.
+POI_ON = os.environ.get("TV_POI", "on").strip().lower() not in ("off", "0", "no", "false")
+POI_COUNT = max(1, min(20, int(os.environ.get("TV_POI_COUNT", "5") or 5)))     # per kind, on screen
+OVERPASS_URL = os.environ.get("TV_OVERPASS_URL", "https://overpass-api.de/api/interpreter")
+POI_KINDS = ("post", "library", "costco")
+POI_KEEP = 40                       # per kind, nearest to the Mac, sent to the page
+_poi_bg = BgCache("poi", ok_ttl=24 * 3600, fail_ttl=300)
+
+
+def poi_query(lat, lon, miles):
+    """Overpass QL for the box the map can show (shorter side `miles`, longer side up to ~1.3x,
+    plus a margin because the cache key is rounded to 0.1 degree)."""
+    import math
+    half_mi = miles * 0.8 + 8
+    dlat = half_mi / 69.0
+    dlon = half_mi / (69.0 * max(0.2, math.cos(math.radians(lat))))
+    box = "%.4f,%.4f,%.4f,%.4f" % (lat - dlat, lon - dlon, lat + dlat, lon + dlon)
+    return ('[out:json][timeout:25];('
+            'nwr["amenity"="post_office"](%(b)s);'
+            'nwr["amenity"="library"](%(b)s);'
+            'nwr["shop"]["brand"="Costco"](%(b)s);'
+            'nwr["shop"]["brand:wikidata"="Q715583"](%(b)s);'
+            'nwr["shop"]["name"~"^Costco",i](%(b)s););out center tags qt;' % {"b": box})
+
+
+def poi_kind(tags):
+    """'post' | 'library' | 'costco' | None for one OSM element's tags."""
+    if tags.get("access") in ("private", "no"):
+        return None
+    if tags.get("amenity") == "post_office":
+        return "post"
+    if tags.get("amenity") == "library":
+        return "library"
+    if tags.get("shop") and (tags.get("brand") == "Costco" or tags.get("brand:wikidata") == "Q715583"
+                             or tags.get("name", "").lower().startswith("costco")):
+        return "costco"
+    return None
+
+
+def poi_parse(elements, lat, lon):
+    """Overpass elements -> [{'t', 'lat', 'lon'}], nearest first per kind, near-duplicates merged
+    (a building way and the node inside it are the same place)."""
+    here = {"lat": lat, "lon": lon}
+    per = {k: [] for k in POI_KINDS}
+    for el in elements:
+        kind = poi_kind(el.get("tags") or {})
+        c = el if "lat" in el else el.get("center") or {}
+        if kind is None or "lat" not in c or "lon" not in c:
+            continue
+        p = {"lat": float(c["lat"]), "lon": float(c["lon"])}
+        if any(_km(p, q) < 0.08 for q in per[kind]):
+            continue
+        p["d"] = _km(here, p)
+        per[kind].append(p)
+    out = []
+    for kind in POI_KINDS:
+        for p in sorted(per[kind], key=lambda q: q["d"])[:POI_KEEP]:
+            out.append({"t": kind, "lat": round(p["lat"], 5), "lon": round(p["lon"], 5)})
+    return out
+
+
+def poi_job(lat, lon, miles):
+    j = http_json(OVERPASS_URL + "?" + urllib.parse.urlencode({"data": poi_query(lat, lon, miles)}), timeout=40)
+    if not isinstance(j, dict) or "elements" not in j:
+        raise ValueError("overpass: unexpected answer")
+    return poi_parse(j["elements"], lat, lon)
+
+
+async def get_poi():
+    if not (NAV_ON and POI_ON):
+        return None
+    loc = await current_location()
+    miles = get_map()["miles"]
+    bucket = 25 if miles <= 25 else 50 if miles <= 50 else 100 if miles <= 100 else 250
+    key = (round(loc["lat"], 1), round(loc["lon"], 1), bucket)
+    value, error, at = _poi_bg.get(key, lambda: poi_job(loc["lat"], loc["lon"], bucket))
+    if value is None:
+        return None
+    return {"items": value, "count": POI_COUNT}
+
+
 async def _soft(coro, what):
     """Run an optional part of /display/data; a failure there must not blank the weather or TV."""
     try:
@@ -1268,6 +1352,7 @@ async def display_data(who: Who = Depends(need("display_data"))):
     out["nav"] = await _soft(get_nav(), "nav")
     out["tides"] = await _soft(get_tides(), "tides")
     out["map"] = get_map()
+    out["poi"] = await _soft(get_poi(), "poi")
     return out
 
 
