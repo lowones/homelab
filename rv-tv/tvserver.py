@@ -686,8 +686,22 @@ TIDE_STATIONS_FILE = RUN_DIR / "tide_stations.json"
 
 def http_json(url, timeout=10):
     req = urllib.request.Request(url, headers={"User-Agent": HTTP_UA, "Accept": "application/json"})
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        return json.load(r)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return json.load(r)
+    except Exception as e:
+        # The mini's Python 3.9 (LibreSSL) fails the TLS handshake with some hosts (OSRM);
+        # system curl handles them. Only retry on TLS errors.
+        import ssl, subprocess
+        reason = getattr(e, "reason", e)
+        if not isinstance(reason, ssl.SSLError) and "SSL" not in str(e):
+            raise
+        out = subprocess.run(["curl", "-sS", "-f", "-m", str(timeout), "-A", HTTP_UA,
+                              "-H", "Accept: application/json", url],
+                             capture_output=True, timeout=timeout + 5)
+        if out.returncode != 0:
+            raise RuntimeError("curl: " + out.stderr.decode("utf-8", "replace").strip()[:200])
+        return json.loads(out.stdout)
 
 
 class Partial(Exception):
