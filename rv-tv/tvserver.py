@@ -228,7 +228,8 @@ GUEST_INPUTS = {"HDMI_1"}                      # guests may only switch to the M
 GUEST_APPS = {"netflix", "amazon", "youtube.leanback.v4"}
 _tok_cache = {"mtime": None, "data": {}}
 ALL_ACTIONS = GUEST_ACTIONS + ["display", "display_data", "admin"]
-_display = {"token": None, "proc": None, "browser": None, "page": None}   # the running kiosk, if any
+_display = {"token": None, "proc": None, "browser": None, "page": None,   # the running kiosk, if any
+            "batcam": None}                                                # id of the Safari window BatCam opened
 
 
 def load_tokens():
@@ -472,6 +473,88 @@ def kiosk_stop():
             p.kill()
             p.wait()
     _display.update(proc=None, token=None, browser=None, page=None)
+
+# ---- BatCam: the cameras site in Safari, fullscreen on the Mac's screen ------------
+# Safari is the Mac's own browser, so its saved login (iCloud Keychain / autofill) applies; the
+# kiosk browser has a separate profile and could not use it. The site does not redirect, so
+# there are two pages: login, and watch (after logging in you land on /protected; press Load).
+BATCAM_BASE = os.environ.get("TV_BATCAM_URL", "https://service.low-ones.com").rstrip("/")
+BATCAM_PAGES = {"login": "/login", "watch": "/watch"}
+
+SAFARI_OPEN = """on run argv
+  set theURL to item 1 of argv
+  tell application "Safari"
+    activate
+    make new document with properties {URL:theURL}
+    delay 1
+    return (id of front window) as text
+  end tell
+end run"""
+# Fullscreen needs Accessibility (System Settings > Privacy & Security > Accessibility) for the
+# process that runs osascript; without it the window is sized to the screen instead.
+SAFARI_FULLSCREEN = """tell application "Safari" to activate
+delay 1
+tell application "System Events" to tell process "Safari" to keystroke "f" using {control down, command down}"""
+SAFARI_FILL = """on run argv
+  set wid to (item 1 of argv) as integer
+  tell application "Finder" to set b to bounds of window of desktop
+  tell application "Safari" to set bounds of window id wid to b
+end run"""
+SAFARI_CLOSE = """on run argv
+  set wid to (item 1 of argv) as integer
+  tell application "Safari"
+    if exists (window id wid) then close (window id wid)
+  end tell
+end run"""
+
+
+def _osa(script, *args, timeout=20):
+    try:
+        r = subprocess.run(["osascript", "-e", script, *args], capture_output=True, text=True, timeout=timeout)
+    except FileNotFoundError:
+        raise RuntimeError("osascript not found: BatCam only works on the Mac")
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("Safari did not answer in %d s: is there a permission prompt on the Mac's screen?" % timeout)
+    if r.returncode != 0:
+        err = (r.stderr or "").strip()
+        if "-1743" in err or "not authorized" in err.lower():
+            err = "not allowed to control Safari: System Settings > Privacy & Security > Automation, allow it. (%s)" % err[:120]
+        raise RuntimeError(err[:300] or "osascript failed")
+    return (r.stdout or "").strip()
+
+
+def batcam_close():
+    """Closes the Safari window BatCam opened. A no-op (False) when none is open. Blocking."""
+    wid = _display.get("batcam")
+    if not wid:
+        return False
+    _display["batcam"] = None
+    try:
+        _osa(SAFARI_CLOSE, wid, timeout=10)
+    except RuntimeError as e:
+        log.info("could not close the BatCam window: %s", e)
+    return True
+
+
+def batcam_open(page):
+    """Opens the login or watch page in a new Safari window, fullscreen. Blocking."""
+    batcam_close()                                  # one window at a time
+    url = BATCAM_BASE + BATCAM_PAGES[page]
+    wid = _osa(SAFARI_OPEN, url, timeout=30)
+    if not wid.isdigit():
+        raise RuntimeError("Safari gave no window id (%r)" % wid[:80])
+    _display["batcam"] = wid
+    fullscreen = False
+    try:
+        _osa(SAFARI_FULLSCREEN, timeout=15)
+        fullscreen = True
+    except RuntimeError as e:
+        log.info("Safari fullscreen refused (%s); sizing the window to the screen instead", e)
+        try:
+            _osa(SAFARI_FILL, wid, timeout=10)
+        except RuntimeError as e2:
+            log.info("could not size the Safari window: %s", e2)
+    return {"batcam": "open", "page": page, "url": url, "fullscreen": fullscreen}
 
 
 def load_location():
@@ -1115,7 +1198,8 @@ async def display_data(who: Who = Depends(need("display_data"))):
 async def display_state(who: Who = Depends(need(None))):
     return {"open": kiosk_running(), "page": _display["page"], "browser": _display["browser"],
             "location": await current_location(), "itinerary": bool(ITIN_SOURCES),
-            "itinerary_error": _itin["error"], "sheet": bool(SHEET_URL)}
+            "itinerary_error": _itin["error"], "sheet": bool(SHEET_URL),
+            "batcam": bool(_display.get("batcam"))}
 
 
 @app.post("/display/open")
@@ -1126,6 +1210,7 @@ async def display_open(tv: bool = Query(True), page: str = Query("dashboard", pa
     if page == "sheet" and not SHEET_URL:
         raise HTTPException(404, "no sheet configured: add TV_SHEET_URL=<link> to tv.env and restart")
     async with get_lock("display"):
+        await asyncio.get_running_loop().run_in_executor(None, batcam_close)   # BatCam window out of the way
         out = await _display_open(tv, page)
     if page == "dashboard" and COPY_ON_OPEN and isinstance(out, dict):
         try:                                      # best effort: never let the clipboard break opening
@@ -1191,7 +1276,40 @@ async def display_close(who: Who = Depends(need("display"))):
     async with get_lock("display"):
         was = kiosk_running()
         await asyncio.get_running_loop().run_in_executor(None, kiosk_stop)
-    return {"display": "closed", "was_open": was}
+        cam = await asyncio.get_running_loop().run_in_executor(None, batcam_close)
+    return {"display": "closed", "was_open": was, "batcam_closed": cam}
+
+
+@app.post("/display/batcam")
+async def batcam_open_endpoint(page: str = Query("watch", pattern="^(login|watch)$"), tv: bool = Query(True),
+                               who: Who = Depends(need("display"))):
+    """Wake the TV, switch it to the Mac, and open the cameras site (page=watch) or its login
+    page (page=login) in Safari, fullscreen. The dashboard keeps running underneath."""
+    out = {}
+    async with get_lock("display"):
+        if tv:
+            try:
+                if await wake_tv(30):
+                    out["tv"] = "on"
+                    await call("ssap://tv/switchInput", {"inputId": MAC_INPUT})
+                    out["input"] = MAC_INPUT
+                else:
+                    out["tv"] = "not answering (Safari opened anyway)"
+            except (TVError, TVUnreachable) as e:
+                out["tv"] = f"problem: {e} (Safari opened anyway)"
+        try:
+            out.update(await asyncio.get_running_loop().run_in_executor(None, batcam_open, page))
+        except RuntimeError as e:
+            raise HTTPException(500, "could not open Safari: %s" % e)
+    return out
+
+
+@app.post("/display/batcam/close")
+async def batcam_close_endpoint(who: Who = Depends(need("display"))):
+    """Closes the Safari window BatCam opened (the dashboard underneath stays)."""
+    async with get_lock("display"):
+        was = await asyncio.get_running_loop().run_in_executor(None, batcam_close)
+    return {"batcam": "closed", "was_open": was}
 
 
 def geocode(place):
@@ -1424,13 +1542,23 @@ form{display:flex;gap:8px;margin-bottom:10px}
 input{flex:1;min-width:0;padding:12px;font:inherit;border-radius:12px;border:1px solid var(--line);background:var(--card);color:var(--fg)}
 form button{padding:12px 14px}
 .note{font-size:14px;opacity:.7;margin:0 0 10px}
+.wide{grid-column:1/-1}
 </style></head><body>
-<h1>RV TV</h1>
+<h1 id="title">RV TV</h1>
 <div id="st">Checking TV...</div>
 <div class="grid">
  <button class="on" data-act="power_on" onclick="go('/power/on?wait=30','Waking the TV (up to 30 s)...')">Power on</button>
  <button data-act="power_off" onclick="go('/power/off','Turning off...')">Power off</button>
 </div>
+<div class="grid">
+ <button data-act="volume" onclick="go('/volume/down','')">Vol &minus;</button>
+ <button data-act="volume" onclick="go('/volume/up','')">Vol +</button>
+</div>
+<div class="grid">
+ <button data-act="mute" onclick="go('/mute/on','')">Mute</button>
+ <button data-act="mute" onclick="go('/mute/off','')">Unmute</button>
+</div>
+<div id="v-main">
 <div class="grid">
  <button data-act="app" onclick="go('/app/netflix','Opening Netflix...')">Netflix</button>
  <button data-act="app" onclick="go('/app/amazon','Opening Prime Video...')">Prime Video</button>
@@ -1438,23 +1566,27 @@ form button{padding:12px 14px}
  <button data-act="input" onclick="go('/input/HDMI_1','Switching to the Mac...')">Mac screen</button>
 </div>
 <div class="grid">
- <button data-act="volume" onclick="go('/volume/down','')">Vol &minus;</button>
- <button data-act="volume" onclick="go('/volume/up','')">Vol +</button>
- <button data-act="mute" onclick="go('/mute/on','')">Mute</button>
- <button data-act="mute" onclick="go('/mute/off','')">Unmute</button>
-</div>
-<div class="grid">
- <button class="on" data-act="display" onclick="go('/display/open','Waking the TV and opening the dashboard (up to 40 s)...')">Show dashboard</button>
- <button data-act="display" onclick="go('/display/open?page=sheet','Opening the sheet on the Mac (up to 40 s)...')">Open sheet</button>
+ <button class="on" data-act="display" onclick="go('/display/open','Waking the TV and opening the dashboard (up to 40 s)...')">BatBoard</button>
+ <button data-act="display" onclick="go('/display/open?page=sheet','Opening the sheet on the Mac (up to 40 s)...')">SNOW</button>
  <button data-act="display" onclick="go('/display/close','Closing the screen...')">Close screen</button>
  <button data-act="display" onclick="copyDest()">Copy destination</button>
- <button data-act="display" onclick="textDest()">Text destination</button>
+ <button data-act="display" onclick="view('cam')">BatCam</button>
 </div>
 <form data-act="admin" onsubmit="setPlace(event)">
  <input id="place" placeholder="Weather place, e.g. Moab, Utah" autocomplete="off">
  <button>Set</button>
  <button type="button" onclick="go('/display/location?auto=true','Weather now follows the Mac location, then the trip schedule...')">Follow location</button>
 </form>
+</div>
+<div id="v-cam" hidden>
+<div class="grid">
+ <button data-act="display" onclick="go('/display/batcam?page=login','Opening the login page in Safari (up to 40 s)...')">Login</button>
+ <button class="on" data-act="display" onclick="go('/display/batcam?page=watch','Opening the cameras in Safari (up to 40 s)...')">Load</button>
+</div>
+<div class="grid">
+ <button class="wide" data-act="display" onclick="home()">Home</button>
+</div>
+</div>
 <script>
 var T=location.hash.slice(1);
 try{if(T){localStorage.setItem('tvtok',T)}else{T=localStorage.getItem('tvtok')||''}}catch(e){}
@@ -1483,13 +1615,18 @@ async function go(path,msg){
   }catch(e){show('Cannot reach the TV box. Are you on the RV Wi-Fi?');return}
   setTimeout(refresh,1500);
 }
-async function textDest(){
-  show('Texting the destination...');
-  try{
-    var r=await api('POST','/display/text-address');
-    if(!r.ok){show(r.j.detail||('Could not send ('+r.status+')'));return}
-    show(r.j.sent?('Texted '+r.j.sent.length+' recipient(s).'):('Not sent: '+r.j.skipped));
-  }catch(e){show('Cannot reach the TV box. Are you on the RV Wi-Fi?')}
+function view(v){
+  var cam=(v==='cam');
+  document.getElementById('v-main').hidden=cam;
+  document.getElementById('v-cam').hidden=!cam;
+  document.getElementById('title').textContent=cam?'BatCam':'RV TV';
+  document.title=cam?'BatCam':'RV TV';
+  if(cam)show('BatCam: press Login if the cameras say 401, then Load.');else refresh();
+}
+async function home(){
+  view('main');
+  try{await api('POST','/display/batcam/close')}catch(e){}
+  setTimeout(refresh,800);
 }
 async function copyDest(){
   show('Copying the destination on the Mac...');
@@ -1528,6 +1665,7 @@ async function refresh(){
     if(can('display')){
       var d=await api('GET','/display/state');
       if(d.ok&&d.j.open)line+=d.j.page==='sheet'?' - sheet open on the Mac':' - dashboard open';
+      if(d.ok&&d.j.batcam)line+=' - BatCam open on the Mac';
     }
     show(line);
   }catch(e){show('Cannot reach the TV box. Are you on the RV Wi-Fi?')}
