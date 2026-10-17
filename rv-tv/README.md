@@ -45,6 +45,20 @@ browser window on the Mac pointed at `/display`. `POST /display/close` closes it
   Quit with the "Close screen" button, or Cmd+Q on the Mac.
 - CLI: `./tv display open|close|state`, `./tv sheet`, `./tv place "City, State"|auto`.
 
+## Canny cameras (live video on the TV)
+Phone menu: **BatCam > Canny (live)** has one button per camera (Driveway, Coop, Barn, Lean-To, RV,
+BatCave) and **All cameras** (a 2-wide grid). A camera opens fullscreen in Safari on the Mac; Home /
+Close screen / Show dashboard remove it. BatCave shows as "not connected" until it is on the LAN.
+- Video comes from **go2rtc on oracle** (house LAN). It asks each camera over ONVIF for its current
+  stream address (the cameras rotate it every few minutes), so nothing is hardcoded. Config example:
+  `cams/go2rtc.yaml.example`. Streams are `NAME` (full size, single view) and `NAME_sub` (640x360, grid).
+- The Mac reaches it through a tunnel: `ssh -N -L 1984:127.0.0.1:1984 oracle-r` (run in Terminal for
+  now), so go2rtc is `http://localhost:1984` on the Mac. `TV_GO2RTC_URL` overrides that.
+- `TV_CAMS_LIVE=driveway,coop` in `tv.env` lists the cameras that are set up in go2rtc (default
+  `driveway`); the rest show "not connected". The page shows a red banner when the tunnel is down.
+- Endpoints: `POST /display/cams?cam=driveway|coop|barn|leanto|rv|batcave|all` (`display` permission),
+  `GET /display/cams?src=...` (the page itself, no secrets).
+
 ## Workflow
 1. `git switch -c my-feature`
 2. Edit, then `bash tests/smoke.sh` (must print ALL PASSED)

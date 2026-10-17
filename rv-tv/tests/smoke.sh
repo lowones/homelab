@@ -7,7 +7,7 @@ set -uo pipefail
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 PY="$HERE/.venv/bin/python"; [ -x "$PY" ] || PY=python3
 T=$(mktemp -d); MOCK_PORT=3198; API_PORT=8798; STUB_PORT=8799
-cleanup() { for p in ${P1:-} ${P2:-} ${P3:-} ${P4:-} ${P5:-} ${P6:-}; do kill $p 2>/dev/null; done; rm -rf "$T"; }
+cleanup() { for p in ${P1:-} ${P2:-} ${P3:-} ${P4:-} ${P5:-} ${P6:-} ${P7:-}; do kill $p 2>/dev/null; done; rm -rf "$T"; }
 trap cleanup EXIT
 openssl req -x509 -newkey rsa:2048 -nodes -days 2 -subj /CN=mock -keyout $T/mock.key -out $T/mock.crt 2>/dev/null
 echo mockkey123 > $T/key.txt   # the key the fake TV accepts
@@ -170,6 +170,31 @@ T4=$T/fourth; mkdir -p $T4
 TV_SERVER_PORT=8795 TV_DISPLAY_FILE=$T4/display.json TV_LOCATION_FILE=$LOC $PY "$HERE/tvserver.py" > $T/server4.log 2>&1 & P6=$!
 for i in $(seq 1 30); do curl -fs http://127.0.0.1:8795/health >/dev/null 2>&1 && break; sleep 0.3; done
 chk "auto allowed with only a device fix" 200 -X POST -H "$A admintok" "http://127.0.0.1:8795/display/location?auto=true"
+
+echo "-- Canny cameras (fake osascript stands in for Safari)"
+mkdir -p $T/bin $T/fifth
+printf '#!/bin/bash\necho "$@" >> "%s/osa.log"\necho 123\n' "$T" > $T/bin/osascript
+chmod +x $T/bin/osascript
+B7=http://127.0.0.1:8794
+PATH="$T/bin:$PATH" TV_SERVER_PORT=8794 TV_DISPLAY_FILE=$T/fifth/display.json TV_LOCATION_FILE=$T/none.loc \
+  TV_CAMS_LIVE=driveway,coop TV_GO2RTC_URL=http://localhost:1984 $PY "$HERE/tvserver.py" > $T/server7.log 2>&1 & P7=$!
+for i in $(seq 1 30); do curl -fs $B7/health >/dev/null 2>&1 && break; sleep 0.3; done
+chk "camera page needs no auth"            200 "$B7/display/cams?src=driveway"
+body "camera page carries the go2rtc url"  'http://localhost:1984' "$B7/display/cams?src=all"
+body "camera page lists a placeholder"     '"id": "batcave", "label": "BatCave", "live": false' "$B7/display/cams?src=all"
+chk "unknown camera name rejected"         422 "$B7/display/cams?src=evil"
+chk "guest cannot open a camera"           403 -X POST -H "$A $G" "$B7/display/cams?cam=driveway&tv=false"
+chk "no token cannot open a camera"        401 -X POST "$B7/display/cams?cam=driveway&tv=false"
+chk "unknown camera rejected on open"      422 -X POST -H "$A admintok" "$B7/display/cams?cam=evil&tv=false"
+chk "BatCave placeholder is not openable"  409 -X POST -H "$A admintok" "$B7/display/cams?cam=batcave&tv=false"
+body "placeholder says not connected"      'not connected yet' -X POST -H "$A admintok" "$B7/display/cams?cam=batcave&tv=false"
+body "admin opens the driveway camera"     '"cam":"driveway"' -X POST -H "$A admintok" "$B7/display/cams?cam=driveway&tv=false"
+body "display guest opens the grid"        '"cam":"all"' -X POST -H "$A $D" "$B7/display/cams?cam=all&tv=false"
+if grep -q 'display/cams?src=all' $T/osa.log; then echo "ok   Safari was asked for the grid page"; else echo "FAIL Safari never got the grid url"; fail=1; fi
+body "state lists the cameras"             '"label":"Coop","live":true' -H "$A admintok" $B7/display/state
+body "state shows the camera window open"  '"batcam":true' -H "$A admintok" $B7/display/state
+body "close screen removes it"             '"batcam_closed":true' -X POST -H "$A admintok" $B7/display/close
+body "default live camera is the driveway" '"id":"driveway","label":"Driveway","live":true' -H "$A admintok" $B/display/state
 
 echo "-- concurrent requests (guest page and dashboard polling at once)"
 pids=""; : > $T/par.txt

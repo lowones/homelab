@@ -1,0 +1,19 @@
+# go2rtc config for the Canny cameras. Lives on oracle (not in git with real passwords):
+#   cp go2rtc.yaml.example ~/go2rtc/go2rtc.yaml   then put the real Onvif user:password in.
+# The cameras change their RTSP address every few minutes; the onvif:// source asks the camera
+# for the current one each time, so nothing here goes stale.
+# Per camera: NAME is the full-size stream (shown when one camera fills the screen), NAME_sub is
+# the 640x360 stream (shown in the grid). ?subtype=SubProfileToken picks the small profile.
+api:
+  listen: "127.0.0.1:1984"      # only reachable through the ssh tunnel from the Mac mini
+rtsp:
+  listen: "127.0.0.1:8554"
+streams:
+  driveway:     onvif://USER:PASSWORD@192.168.0.70
+  driveway_sub: onvif://USER:PASSWORD@192.168.0.70?subtype=SubProfileToken
+  # Add one pair per camera when it is ready, then add its name to TV_CAMS_LIVE in tv.env:
+  # coop:      onvif://USER:PASSWORD@192.168.0.152
+  # barn:      onvif://USER:PASSWORD@192.168.0.67
+  # leanto:    onvif://USER:PASSWORD@192.168.0.64
+  # rv:        onvif://USER:PASSWORD@192.168.0.58
+  # batcave:   (not reachable from the LAN yet)

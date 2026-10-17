@@ -481,6 +481,23 @@ def kiosk_stop():
 BATCAM_BASE = os.environ.get("TV_BATCAM_URL", "https://service.low-ones.com").rstrip("/")
 BATCAM_PAGES = {"login": "/login", "watch": "/watch"}
 
+# ---- Canny cameras: live video from go2rtc (runs on oracle at the house), shown in Safari ------
+# go2rtc turns each camera's rotating ONVIF stream URL into a stable stream name. The Mac reaches
+# it through an ssh tunnel to oracle (ssh -N -L 1984:127.0.0.1:1984 oracle-r), so from the Mac's
+# browser it is http://localhost:1984. Per camera two streams are expected in go2rtc.yaml:
+#   <name>      the full-size stream (used when one camera is shown fullscreen)
+#   <name>_sub  the small 640x360 stream (used in the grid; far lighter on Starlink)
+# TV_CAMS_LIVE lists the cameras that are set up in go2rtc; the others show as "not connected".
+GO2RTC_URL = os.environ.get("TV_GO2RTC_URL", "http://localhost:1984").rstrip("/")
+CAMS = [("driveway", "Driveway"), ("coop", "Coop"), ("barn", "Barn"),
+        ("leanto", "Lean-To"), ("rv", "RV"), ("batcave", "BatCave")]
+CAM_LABEL = dict(CAMS)
+CAMS_LIVE = [c.strip() for c in os.environ.get("TV_CAMS_LIVE", "driveway").split(",") if c.strip() in CAM_LABEL]
+
+
+def cam_list():
+    return [{"id": c, "label": l, "live": c in CAMS_LIVE} for c, l in CAMS]
+
 SAFARI_OPEN = """on run argv
   set theURL to item 1 of argv
   tell application "Safari"
@@ -536,10 +553,10 @@ def batcam_close():
     return True
 
 
-def batcam_open(page):
-    """Opens the login or watch page in a new Safari window, fullscreen. Blocking."""
+def _safari_show(url):
+    """Opens url in a new Safari window and makes it fullscreen. Remembers the window so
+    batcam_close() (Home, Close screen, Show dashboard) removes it. Blocking."""
     batcam_close()                                  # one window at a time
-    url = BATCAM_BASE + BATCAM_PAGES[page]
     wid = _osa(SAFARI_OPEN, url, timeout=30)
     if not wid.isdigit():
         raise RuntimeError("Safari gave no window id (%r)" % wid[:80])
@@ -554,7 +571,21 @@ def batcam_open(page):
             _osa(SAFARI_FILL, wid, timeout=10)
         except RuntimeError as e2:
             log.info("could not size the Safari window: %s", e2)
+    return fullscreen
+
+
+def batcam_open(page):
+    """Opens the login or watch page in a new Safari window, fullscreen. Blocking."""
+    url = BATCAM_BASE + BATCAM_PAGES[page]
+    fullscreen = _safari_show(url)
     return {"batcam": "open", "page": page, "url": url, "fullscreen": fullscreen}
+
+
+def cams_open(cam):
+    """Opens one Canny camera (or cam='all', a 2-wide grid) from go2rtc in Safari. Blocking."""
+    url = "http://%s:%d/display/cams?src=%s" % (BIND, SERVER_PORT, urllib.parse.quote(cam))
+    fullscreen = _safari_show(url)
+    return {"cams": "open", "cam": cam, "url": url, "fullscreen": fullscreen}
 
 
 # JavaScript run inside the Safari window by AppleScript's "do JavaScript". Single quotes only.
@@ -1245,7 +1276,7 @@ async def display_state(who: Who = Depends(need(None))):
     return {"open": kiosk_running(), "page": _display["page"], "browser": _display["browser"],
             "location": await current_location(), "itinerary": bool(ITIN_SOURCES),
             "itinerary_error": _itin["error"], "sheet": bool(SHEET_URL),
-            "batcam": bool(_display.get("batcam"))}
+            "batcam": bool(_display.get("batcam")), "cams": cam_list()}
 
 
 @app.post("/display/open")
@@ -1371,6 +1402,47 @@ async def batcam_do_endpoint(action: str = Query(..., pattern="^(top|bottom|past
         except RuntimeError as e:
             raise HTTPException(500, str(e))
     return {"action": action, "result": res}
+
+
+CAM_NAME_RE = "^(all|%s)$" % "|".join(c for c, _ in CAMS)
+
+
+@app.get("/display/cams", response_class=HTMLResponse)
+async def cams_page(src: str = Query("all", pattern=CAM_NAME_RE)):
+    """The camera page Safari shows: one camera filling the screen, or src=all for a 2-wide grid.
+    Holds no secrets (the video itself comes from go2rtc, reachable only from the Mac)."""
+    html = (DISPLAY_DIR / "cams.html").read_text()
+    cfg = {"g2r": GO2RTC_URL, "cams": cam_list(), "src": src}
+    return html.replace("__CFG__", json.dumps(cfg).replace("<", "\\u003c"))
+
+
+@app.post("/display/cams")
+async def cams_open_endpoint(cam: str = Query("all", pattern=CAM_NAME_RE), tv: bool = Query(True),
+                             who: Who = Depends(need("display"))):
+    """Wake the TV, switch it to the Mac, and show one Canny camera (cam=driveway ...) or all of
+    them in a 2-wide grid (cam=all) fullscreen in Safari. Close screen / Home removes it."""
+    if cam == "all":
+        if not CAMS_LIVE:
+            raise HTTPException(409, "no cameras are set up yet (TV_CAMS_LIVE is empty)")
+    elif cam not in CAMS_LIVE:
+        raise HTTPException(409, "%s is not connected yet" % CAM_LABEL[cam])
+    out = {}
+    async with get_lock("display"):
+        if tv:
+            try:
+                if await wake_tv(30):
+                    out["tv"] = "on"
+                    await call("ssap://tv/switchInput", {"inputId": MAC_INPUT})
+                    out["input"] = MAC_INPUT
+                else:
+                    out["tv"] = "not answering (Safari opened anyway)"
+            except (TVError, TVUnreachable) as e:
+                out["tv"] = f"problem: {e} (Safari opened anyway)"
+        try:
+            out.update(await asyncio.get_running_loop().run_in_executor(None, cams_open, cam))
+        except RuntimeError as e:
+            raise HTTPException(500, "could not open Safari: %s" % e)
+    return out
 
 
 def geocode(place):
@@ -1644,6 +1716,9 @@ form button{padding:12px 14px}
  <button class="on" data-act="display" onclick="go('/display/batcam?page=watch','Opening the cameras in Safari (up to 40 s)...')">Load</button>
 </div>
 <div class="grid">
+ <button class="wide" data-act="display" onclick="view('canny')">Canny (live)</button>
+</div>
+<div class="grid">
  <button data-act="display" onclick="cam('top')">Top</button>
  <button data-act="display" onclick="cam('bottom')">Bottom</button>
 </div>
@@ -1653,6 +1728,16 @@ form button{padding:12px 14px}
 </div>
 <div class="grid">
  <button class="wide" data-act="display" onclick="home()">Home</button>
+</div>
+</div>
+<div id="v-canny" hidden>
+<div class="grid">
+ <button class="wide on" data-act="display" onclick="camGo('all','all cameras')">All cameras</button>
+</div>
+<div class="grid" id="canny-btns"></div>
+<div class="grid">
+ <button data-act="display" onclick="view('cam')">Back</button>
+ <button data-act="display" onclick="home()">Home</button>
 </div>
 </div>
 <script>
@@ -1684,12 +1769,33 @@ async function go(path,msg){
   setTimeout(refresh,1500);
 }
 function view(v){
-  var cam=(v==='cam');
-  document.getElementById('v-main').hidden=cam;
-  document.getElementById('v-cam').hidden=!cam;
-  document.getElementById('title').textContent=cam?'BatCam':'RV TV';
-  document.title=cam?'BatCam':'RV TV';
-  if(cam)show('BatCam: press Login if the cameras say 401, then Load.');else refresh();
+  var titles={main:'RV TV',cam:'BatCam',canny:'Canny'};
+  ['main','cam','canny'].forEach(function(n){document.getElementById('v-'+n).hidden=(n!==v)});
+  document.getElementById('title').textContent=titles[v];
+  document.title=titles[v];
+  if(v==='cam')show('BatCam: press Login if the cameras say 401, then Load.');
+  else if(v==='canny'){show('Canny: pick a camera.');loadCams()}
+  else refresh();
+}
+async function loadCams(){
+  var box=document.getElementById('canny-btns');
+  try{
+    var d=await api('GET','/display/state');
+    if(!d.ok||!d.j.cams)return;
+    box.innerHTML='';
+    d.j.cams.forEach(function(c){
+      var b=document.createElement('button');
+      b.dataset.act='display';
+      b.textContent=c.live?c.label:c.label+' (not connected)';
+      if(!c.live)b.style.opacity='.5';
+      b.onclick=function(){camGo(c.id,c.label)};
+      box.appendChild(b);
+    });
+    applyPerms();
+  }catch(e){show('Cannot reach the TV box. Are you on the RV Wi-Fi?')}
+}
+function camGo(id,label){
+  go('/display/cams?cam='+encodeURIComponent(id),'Opening '+label+' (up to 40 s)...');
 }
 var CAMSAY={top:'Top',bottom:'Bottom',past:'PAST',new:'NEW'};
 async function cam(action){
