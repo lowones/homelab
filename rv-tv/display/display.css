@@ -1,17 +1,20 @@
 /* Everything is sized in rem and 1rem = 1/80 of the screen width, so the same page
-   fills a 1080p TV, a 4K TV or a laptop window. Read from across the room: big type,
-   high contrast, nothing that needs a pointer. */
+   fills a 1080p TV, a 4K TV or a laptop window (1080p: 1rem = 24px, the screen is 80rem x 45rem).
+   Left half: the map. Right half, top to bottom: where we are, weather + sun + tides, clock, TV.
+   Read from across the room: big type, high contrast, nothing that needs a pointer. */
 :root {
   --sky-top: #0d1220;
   --sky-bottom: #1d2745;
   --ink: #f6efe3;
   --ink-dim: rgba(246, 239, 227, .74);
+  --rule: rgba(246, 239, 227, .22);
   --signal: #ffb02e;
+  --target: #27c4b4;
 }
 html { font-size: calc(100vw / 80); }
 body {
   margin: 0;
-  min-height: 100vh;
+  height: 100vh;
   overflow: hidden;
   cursor: none;
   color: var(--ink);
@@ -22,14 +25,14 @@ body {
 #grid {
   display: grid;
   grid-template-columns: repeat(12, 1fr);
-  grid-template-rows: 1fr auto;
-  column-gap: 3rem;
-  row-gap: 2rem;
+  grid-template-rows: auto auto 1fr auto auto;   /* where | weather | (spare) | clock | tv */
+  column-gap: 2.4rem;
+  row-gap: .8rem;
   box-sizing: border-box;
-  min-height: 100vh;
-  padding: 4.5rem 5.5rem 3rem;
+  height: 100vh;
+  padding: 1.6rem 2.4rem 1.4rem 1.8rem;
 }
-.widget { min-width: 0; align-self: center; }
+.widget { min-width: 0; align-self: start; }
 .widget.broken { color: var(--signal); font-size: 1.4rem; }
 
 #banner {
@@ -37,46 +40,103 @@ body {
   top: 1.2rem;
   left: 50%;
   transform: translateX(-50%);
+  z-index: 2000;
   padding: .5rem 1.6rem;
   background: rgba(0, 0, 0, .6);
   color: var(--signal);
   font-size: 1.5rem;
 }
 
-/* clock: the one big thing */
-.clock-time { font-size: 11.5rem; line-height: .9; font-weight: 600; letter-spacing: -.025em;
-  font-variant-numeric: tabular-nums; white-space: nowrap; }
-.clock-time .ap { font-size: 3rem; font-weight: 500; letter-spacing: 0; margin-left: 1.2rem; color: var(--ink-dim); }
-.clock-date { font-size: 2.8rem; margin-top: 1.8rem; color: var(--ink-dim); }
+/* ---- map (left half) ------------------------------------------------------------- */
+.widget-map { align-self: stretch; position: relative; min-height: 0; overflow: hidden;
+  border-radius: 1.1rem; background: #1d2a33; box-shadow: 0 .4rem 2rem rgba(0, 0, 0, .45); }
+.map-canvas { position: absolute; inset: 0; }
+.map-canvas.leaflet-container { background: #1d2a33; font-family: inherit; cursor: none; }
+.map-note { position: absolute; left: 1rem; bottom: 2.6rem; z-index: 1000; max-width: 80%;
+  font-size: 1.15rem; padding: .35rem .8rem; border-radius: .4rem;
+  background: rgba(0, 0, 0, .65); color: var(--signal); }
+.leaflet-control-attribution { font-size: .62rem !important; background: rgba(0, 0, 0, .45) !important; color: #d8d4cc !important; }
+.leaflet-control-attribution a { color: #fff !important; }
+.leaflet-control-scale-line { font-size: .85rem; border-color: #fff; color: #fff; background: rgba(0, 0, 0, .35);
+  text-shadow: 0 0 .2rem #000; }
+.hike-pin { background: none; border: 0; }
+.hike-pin svg { display: block; filter: drop-shadow(0 .1rem .1rem rgba(0, 0, 0, .55)); }
+.widget-map .marker-cluster-small, .widget-map .marker-cluster-medium, .widget-map .marker-cluster-large {
+  background: rgba(225, 29, 46, .35); }
+.widget-map .marker-cluster-small div, .widget-map .marker-cluster-medium div, .widget-map .marker-cluster-large div {
+  background: rgba(225, 29, 46, .92); color: #fff; font-weight: 700; font-size: 1.05rem; font-family: inherit; }
+.rv-here { position: relative; background: none; border: 0; }
+.rv-here .dot { position: absolute; inset: 22%; border-radius: 50%; background: var(--signal);
+  border: .16rem solid #fff; box-shadow: 0 0 .5rem rgba(0, 0, 0, .7); }
+.rv-here .pulse { position: absolute; inset: 0; border-radius: 50%; background: rgba(255, 176, 46, .45);
+  animation: rv-pulse 2.4s ease-out infinite; }
+@keyframes rv-pulse { 0% { transform: scale(.45); opacity: .9; } 100% { transform: scale(1.5); opacity: 0; } }
+.rv-target { background: none; border: 0; }
+.rv-target span { position: absolute; inset: 18%; transform: rotate(45deg); background: var(--target);
+  border: .16rem solid #fff; box-shadow: 0 0 .5rem rgba(0, 0, 0, .7); }
 
-/* weather: a column set apart from the clock by a rule, because it is a different kind of fact */
-.widget-weather { border-left: .15rem solid rgba(246, 239, 227, .28); padding-left: 2.5rem; }
-.wx-place { font-size: 1.8rem; color: var(--ink-dim); }
-.wx-now { display: flex; align-items: center; gap: 1.2rem; margin: .4rem 0 .2rem; }
-.wx-icon { font-size: 5rem; line-height: 1; }
-.wx-temp { font-size: 7.5rem; line-height: 1; font-weight: 600; }
-.wx-desc { font-size: 2.1rem; }
-.wx-sub { font-size: 1.6rem; color: var(--ink-dim); margin-top: .3rem; }
-.wx-days { list-style: none; margin: 2.2rem 0 0; padding: 0; font-size: 1.9rem; }
-.wx-days li { display: grid; grid-template-columns: 1fr auto 4.5rem 4.5rem; align-items: center;
-  column-gap: 1rem; padding: .35rem 0; }
-.wx-days .i { font-size: 2.2rem; }
+/* ---- where we are --------------------------------------------------------------- */
+.loc-badge { display: inline-block; font-size: 1.15rem; font-weight: 700; letter-spacing: .12em;
+  padding: .15rem .7rem; margin-bottom: .45rem; border-radius: .35rem; background: var(--signal); color: #1a1205; }
+.loc-label { font-size: 3rem; line-height: 1.05; font-weight: 600; letter-spacing: -.01em; overflow-wrap: anywhere; }
+.loc-src { font-size: 1.15rem; color: var(--ink-dim); margin-top: .25rem; }
+.loc-target { display: flex; align-items: baseline; gap: .9rem; margin-top: .6rem; font-size: 1.9rem; }
+.loc-target .k { font-size: 1.15rem; letter-spacing: .1em; text-transform: uppercase; color: var(--target); }
+.loc-target .v { font-weight: 600; overflow-wrap: anywhere; }
+.loc-meta { font-size: 1.45rem; color: var(--ink-dim); margin-top: .15rem; }
+.loc-note { font-size: 1.1rem; color: var(--signal); margin-top: .2rem; }
+
+/* ---- weather, sun, tides --------------------------------------------------------- */
+.wx-top { display: flex; align-items: center; gap: 1.5rem; }
+.wx-icon { font-size: 3.8rem; line-height: 1; }
+.wx-temp { font-size: 4.6rem; line-height: 1; font-weight: 600; }
+.wx-side { display: flex; flex-direction: column; gap: .12rem; min-width: 0; }
+.wx-desc { font-size: 1.9rem; }
+.wx-sub { font-size: 1.35rem; color: var(--ink-dim); }
+.wx-sun { font-size: 1.45rem; margin-top: .25rem; white-space: nowrap; }
+.wx-sun .k { color: var(--ink-dim); margin-right: .35rem; }
+.wx-sun .gap { display: inline-block; width: 1.2rem; }
+.wx-days { list-style: none; margin: .7rem 0 0; padding: 0; font-size: 1.6rem; }
+.wx-days li { display: grid; grid-template-columns: 1fr auto 3.4rem 3.4rem; align-items: center;
+  column-gap: .9rem; padding: .12rem 0; }
+.wx-days .i { font-size: 1.8rem; }
 .wx-days .hi { text-align: right; font-weight: 600; }
 .wx-days .lo { text-align: right; color: var(--ink-dim); }
-.wx-error { font-size: 1.7rem; color: var(--signal); }
+.wx-error { font-size: 1.5rem; color: var(--signal); }
+.wx-tides { margin-top: .6rem; padding-top: .5rem; border-top: .1rem solid var(--rule); }
+.wx-tides h3 { display: flex; justify-content: space-between; align-items: baseline; gap: 1.2rem;
+  margin: 0 0 .35rem; font-size: 1.1rem; font-weight: 500; color: var(--ink-dim); }
+.wx-tides h3 .l { letter-spacing: .09em; text-transform: uppercase; white-space: nowrap; }
+.wx-tides h3 .r { font-size: 1.2rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.tide-list { display: grid; grid-template-columns: 1fr 1fr; gap: .2rem 1.4rem; font-size: 1.5rem; }
+.tide { display: flex; align-items: baseline; gap: .55rem; white-space: nowrap; }
+.tide .ar { width: 1rem; color: var(--ink-dim); }
+.tide .when { font-weight: 600; }
+.tide .ht { color: var(--ink-dim); }
+.tide.past { opacity: .42; }
+.tide.next { color: var(--signal); }
+.tide.next .ar, .tide.next .ht { color: var(--signal); }
 
-/* TV strip along the bottom */
-.widget-tv { align-self: end; display: flex; align-items: center; gap: 3.5rem;
-  font-size: 1.7rem; color: var(--ink-dim); }
-.widget-tv .dot { display: inline-block; width: .9rem; height: .9rem; border-radius: 50%;
-  margin-right: .8rem; background: rgba(246, 239, 227, .4); vertical-align: .1rem; }
+/* ---- clock: small on purpose ----------------------------------------------------- */
+.widget-clock { align-self: end; display: flex; align-items: baseline; gap: 1rem; color: var(--ink-dim); }
+.clock-time { font-size: 1.7rem; line-height: 1; font-weight: 600; font-variant-numeric: tabular-nums;
+  white-space: nowrap; color: var(--ink); }
+.clock-time .ap { font-size: 1.15rem; font-weight: 500; margin-left: .4rem; color: var(--ink-dim); }
+.clock-date { font-size: 1.4rem; margin: 0; }
+
+/* TV strip along the bottom of the right half */
+.widget-tv { align-self: end; display: flex; align-items: center; gap: 2.4rem;
+  font-size: 1.3rem; color: var(--ink-dim); }
+.widget-tv .dot { display: inline-block; width: .8rem; height: .8rem; border-radius: 50%;
+  margin-right: .6rem; background: rgba(246, 239, 227, .4); vertical-align: .05rem; }
 .widget-tv .dot.on { background: var(--signal); }
 
 /* previewing from a phone with /display#<admin token>: stack and enlarge */
 @media (max-width: 900px) {
   html { font-size: calc(100vw / 36); }
-  body { overflow: auto; cursor: auto; }
-  #grid { grid-template-columns: 1fr; padding: 2.5rem 2rem; }
-  .widget { grid-column: 1 / -1 !important; }
-  .widget-weather { border-left: 0; padding-left: 0; }
+  body { overflow: auto; cursor: auto; height: auto; }
+  #grid { display: flex; flex-direction: column; height: auto; padding: 2.5rem 2rem; gap: 1.6rem; }
+  .widget { grid-column: auto !important; grid-row: auto !important; }
+  .widget-map { height: 60vw; min-height: 24rem; flex: none; }
+  .widget-clock, .widget-tv { align-self: start; }
 }

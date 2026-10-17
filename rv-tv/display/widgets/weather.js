@@ -1,4 +1,5 @@
-// Weather codes are WMO codes as returned by Open-Meteo.
+// Weather codes are WMO codes as returned by Open-Meteo. Sunrise and sunset come from the same
+// call; tides come from the nearest NOAA prediction station (data.tides, absent inland).
 const CODES = [
   [[0], 'Clear', '☀️'], [[1], 'Mostly clear', '🌤️'], [[2], 'Partly cloudy', '⛅'], [[3], 'Overcast', '☁️'],
   [[45, 48], 'Fog', '🌫️'], [[51, 53, 55, 56, 57], 'Drizzle', '🌦️'], [[61, 63, 65, 66, 67], 'Rain', '🌧️'],
@@ -16,35 +17,81 @@ const dayName = (iso, i) => {
   return new Date(y, m - 1, d).toLocaleDateString([], { weekday: 'long' });
 };
 const clock = new Intl.DateTimeFormat([], { hour: 'numeric', minute: '2-digit' });
+const pad = n => String(n).padStart(2, '0');
+const ymd = d => d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate());
+
+// '2026-10-16T07:34' (Open-Meteo, already local to the place) -> '7:34 AM'
+function sunTime(s) {
+  const m = /T(\d\d):(\d\d)/.exec(s || '');
+  return m ? clock.format(new Date(2000, 0, 1, +m[1], +m[2])) : null;
+}
+// '2026-10-16 03:12' (NOAA, local station time) -> Date
+function tideDate(s) {
+  const m = /^(\d{4})-(\d\d)-(\d\d) (\d\d):(\d\d)$/.exec(s || '');
+  return m ? new Date(+m[1], m[2] - 1, +m[3], +m[4], +m[5]) : null;
+}
 
 function add(parent, tag, cls, text) {
   const n = document.createElement(tag);
   if (cls) n.className = cls;
-  if (text != null) n.textContent = text;          // textContent only: the place name is user-set
+  if (text != null) n.textContent = text;          // textContent only
   parent.appendChild(n);
   return n;
 }
 
+// Today's high and low tides; once they have all passed, tomorrow's.
+function tidePlan(t, now) {
+  const ev = (t.events || []).map(e => ({ ...e, d: tideDate(e.t) })).filter(e => e.d);
+  const today = ymd(now);
+  const todays = ev.filter(e => ymd(e.d) === today);
+  const upcoming = todays.some(e => e.d > now);
+  const rows = (upcoming ? todays : ev.filter(e => ymd(e.d) !== today)).slice(0, 4);
+  return { label: upcoming ? 'Tides today' : 'Tides tomorrow', rows, nextIdx: rows.findIndex(e => e.d > now) };
+}
+
+function drawTides(el, t, now) {
+  if (!t || !t.station || !t.events || !t.events.length) return;          // inland, or not fetched yet
+  const plan = tidePlan(t, now);
+  if (!plan.rows.length) return;
+  const box = add(el, 'div', 'wx-tides');
+  const head = add(box, 'h3');
+  add(head, 'span', 'l', plan.label);
+  add(head, 'span', 'r', t.station + (t.miles != null ? ' · ' + t.miles + ' mi' : ''));
+  const list = add(box, 'div', 'tide-list');
+  plan.rows.forEach((e, i) => {
+    const cls = 'tide' + (e.d <= now ? ' past' : '') + (i === plan.nextIdx ? ' next' : '');
+    const row = add(list, 'div', cls);
+    add(row, 'span', 'ar', e.type === 'H' ? '▲' : '▼');
+    add(row, 'span', 'when', clock.format(e.d));
+    add(row, 'span', 'ht', e.v.toFixed(1) + ' ft');
+  });
+}
+
 export default {
   render(el, data) {
-    const w = data.weather;
+    const w = data.weather || {};
     el.replaceChildren();
-    add(el, 'div', 'wx-place', w.location);
-    if (w.source === 'itinerary') add(el, 'div', 'wx-sub', 'From the trip schedule');
-    if (w.source === 'device') add(el, 'div', 'wx-sub', "From this Mac's location");
-    if (w.schedule) add(el, 'div', 'wx-sub', 'Schedule says ' + w.schedule);
     if (!w.data) {
       add(el, 'div', 'wx-error', 'Weather unavailable');
       add(el, 'div', 'wx-sub', 'The Mac needs internet to fetch it. Trying again soon.');
+      drawTides(el, data.tides, new Date());
       return;
     }
     const cur = describe(w.data.code);
-    const now = add(el, 'div', 'wx-now');
-    add(now, 'span', 'wx-icon', cur.icon);
-    add(now, 'span', 'wx-temp', deg(w.data.temp));
-    add(el, 'div', 'wx-desc', cur.text);
-    add(el, 'div', 'wx-sub', 'Feels like ' + deg(w.data.feels));
-    add(el, 'div', 'wx-sub', 'Wind ' + Math.round(w.data.wind) + ' mph');
+    const top = add(el, 'div', 'wx-top');
+    add(top, 'span', 'wx-icon', cur.icon);
+    add(top, 'span', 'wx-temp', deg(w.data.temp));
+    const side = add(top, 'div', 'wx-side');
+    add(side, 'div', 'wx-desc', cur.text);
+    add(side, 'div', 'wx-sub', 'Feels like ' + deg(w.data.feels) + ' · Wind ' + Math.round(w.data.wind) + ' mph');
+    const today = w.data.days[0] || {};
+    const rise = sunTime(today.rise), set = sunTime(today.set);
+    if (rise || set) {
+      const sun = add(side, 'div', 'wx-sun');
+      if (rise) { add(sun, 'span', 'k', '🌅'); sun.appendChild(document.createTextNode(rise)); }
+      if (rise && set) add(sun, 'span', 'gap');
+      if (set) { add(sun, 'span', 'k', '🌇'); sun.appendChild(document.createTextNode(set)); }
+    }
     const list = add(el, 'ul', 'wx-days');
     w.data.days.forEach((d, i) => {
       const li = add(list, 'li');
@@ -53,6 +100,7 @@ export default {
       add(li, 'span', 'hi', deg(d.hi));
       add(li, 'span', 'lo', deg(d.lo));
     });
+    drawTides(el, data.tides, new Date());
     if (w.error && w.updated) add(el, 'div', 'wx-sub', 'Showing data from ' + clock.format(new Date(w.updated * 1000)));
   },
 };

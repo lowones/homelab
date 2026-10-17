@@ -491,7 +491,7 @@ def save_state(**changes):
     return cur
 
 
-_itin = {"rows": {}, "next": {}, "error": None}     # per source: parsed rows, when to refetch
+_itin = {"rows": {}, "next": {}, "stops": {}, "error": None}     # per source: parsed rows, when to refetch
 _geo = {}                                            # city -> (lat, lon, label)
 DATE_RE = re.compile(r"^\s*(\d{1,2})/(\d{1,2})/(\d{4})\s*$")
 
@@ -525,7 +525,9 @@ def itinerary_city(today):
     for src in ITIN_SOURCES:
         if now >= _itin["next"].get(src, 0):
             try:
-                _itin["rows"][src] = parse_itinerary(read_source(src))
+                text = read_source(src)
+                _itin["rows"][src] = parse_itinerary(text)
+                _itin["stops"][src] = parse_stops(text)
                 _itin["next"][src] = now + 6 * 3600
                 _itin["error"] = None
             except Exception as e:
@@ -629,7 +631,7 @@ def fetch_weather(loc):
     q = urllib.parse.urlencode({
         "latitude": loc["lat"], "longitude": loc["lon"], "timezone": "auto", "forecast_days": 3,
         "current": "temperature_2m,apparent_temperature,weather_code,wind_speed_10m",
-        "daily": "temperature_2m_max,temperature_2m_min,weather_code",
+        "daily": "temperature_2m_max,temperature_2m_min,weather_code,sunrise,sunset",
         "temperature_unit": "fahrenheit", "wind_speed_unit": "mph"})
     with urllib.request.urlopen(f"{WEATHER_URL}?{q}", timeout=8) as r:
         j = json.load(r)
@@ -637,7 +639,9 @@ def fetch_weather(loc):
     return {"temp": cur["temperature_2m"], "feels": cur["apparent_temperature"],
             "code": cur["weather_code"], "wind": cur["wind_speed_10m"],
             "days": [{"date": d["time"][i], "hi": d["temperature_2m_max"][i],
-                      "lo": d["temperature_2m_min"][i], "code": d["weather_code"][i]}
+                      "lo": d["temperature_2m_min"][i], "code": d["weather_code"][i],
+                      "rise": (d.get("sunrise") or [None] * len(d["time"]))[i],
+                      "set": (d.get("sunset") or [None] * len(d["time"]))[i]}
                      for i in range(len(d["time"]))]}
 
 
@@ -660,6 +664,373 @@ async def get_weather():
             "updated": _weather["at"], "schedule": loc.get("schedule")}
 
 
+# ==== NAV: next stop, route, tides (map dashboard) ===================================
+# Everything here fetches in a background thread and serves the last good answer, so a slow
+# or dead Starlink link never holds up /display/data. All of it is optional: TV_NAV=off
+# turns it off and the dashboard falls back to the weather location alone.
+import threading
+
+NAV_ON = os.environ.get("TV_NAV", "on").strip().lower() not in ("off", "0", "no", "false")
+NOMINATIM_URL = os.environ.get("TV_NOMINATIM_URL", "https://nominatim.openstreetmap.org/search")
+OSRM_URL = os.environ.get("TV_OSRM_URL", "https://router.project-osrm.org/route/v1/driving")
+TIDE_DATA_URL = os.environ.get("TV_TIDES_URL", "https://api.tidesandcurrents.noaa.gov/api/prod/datagetter")
+TIDE_STATIONS_URL = os.environ.get(
+    "TV_TIDE_STATIONS_URL",
+    "https://api.tidesandcurrents.noaa.gov/mdapi/prod/webapi/stations.json?type=tidepredictions")
+TIDE_MAX_KM = float(os.environ.get("TV_TIDE_MAX_KM", "60"))       # farther than this: no tide row
+ROUTE_CROP_KM = float(os.environ.get("TV_ROUTE_CROP_KM", "130"))  # keep route points this close to the Mac
+HTTP_UA = os.environ.get("TV_HTTP_UA", "rv-tv-dashboard/1.0 (personal use)")
+GEOCACHE_FILE = RUN_DIR / "nav_geocache.json"
+TIDE_STATIONS_FILE = RUN_DIR / "tide_stations.json"
+
+
+def http_json(url, timeout=10):
+    req = urllib.request.Request(url, headers={"User-Agent": HTTP_UA, "Accept": "application/json"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.load(r)
+
+
+class Partial(Exception):
+    """Raised by a background job whose result is usable but degraded (e.g. a straight line
+    because the routing service is down); the value is kept and the job retries sooner."""
+    def __init__(self, value, message):
+        super().__init__(message)
+        self.value = value
+
+
+class BgCache:
+    """get(key, fn) returns (value, error, fetched_at) straight away and, when the entry is
+    stale, refreshes it in a daemon thread. Until the first fetch ends the value is None."""
+    def __init__(self, name, ok_ttl, fail_ttl):
+        self.name, self.ok_ttl, self.fail_ttl = name, ok_ttl, fail_ttl
+        self._lock = threading.Lock()
+        self._items = {}
+
+    def get(self, key, fn):
+        now = time.time()
+        with self._lock:
+            e = self._items.get(key)
+            if e is None:
+                if len(self._items) >= 40:                    # the RV moves; forget old places
+                    del self._items[min(self._items, key=lambda k: self._items[k]["touched"])]
+                e = self._items[key] = {"value": None, "error": None, "at": None, "next": 0.0,
+                                        "busy": False, "touched": now}
+            e["touched"] = now
+            start = now >= e["next"] and not e["busy"]
+            if start:
+                e["busy"] = True
+            snap = (e["value"], e["error"], e["at"])
+        if start:
+            threading.Thread(target=self._run, args=(key, fn), daemon=True, name="bg-" + self.name).start()
+        return snap
+
+    def _run(self, key, fn):
+        value = error = None
+        state = "fail"
+        try:
+            value, state = fn(), "ok"
+        except Partial as p:
+            value, error, state = p.value, str(p), "partial"
+        except Exception as ex:
+            error = str(ex) or type(ex).__name__
+            log.warning("%s refresh failed: %s", self.name, error)
+        now = time.time()
+        with self._lock:
+            e = self._items.get(key)
+            if e is None:
+                return
+            e["busy"] = False
+            if state == "ok":
+                e.update(value=value, error=None, at=now, next=now + self.ok_ttl)
+            elif state == "partial":
+                e.update(value=value, error=error, at=now, next=now + self.fail_ttl)
+            else:
+                e.update(error=error, next=now + self.fail_ttl)
+
+
+_route_bg = BgCache("route", ok_ttl=6 * 3600, fail_ttl=90)
+_tide_bg = BgCache("tides", ok_ttl=3 * 3600, fail_ttl=120)
+
+
+# ---- next stop (column K of the trip sheet) ----------------------------------------
+def parse_stops(text):
+    """CSV text -> [{'date', 'city', 'address', 'row'}] sorted by date. Column 4 is the city,
+    column 11 (K) the street address of that stop. Rows with a blank city are 'still there'."""
+    stops = []
+    for n, r in enumerate(csv.reader(io.StringIO(text)), 1):
+        m = DATE_RE.match(r[1]) if len(r) > 1 else None
+        city = r[3].strip() if len(r) > 3 else ""
+        if m and city:
+            stops.append({"date": datetime.date(int(m[3]), int(m[1]), int(m[2])), "city": city,
+                          "address": r[10].strip() if len(r) > 10 else "", "row": n})
+    return sorted(stops, key=lambda s: (s["date"], s["row"]))
+
+
+def pick_target(today, move_day):
+    """Blocking. Which stop the map should aim at.
+    Move day (the Mac is far from where the sheet says today): today's own stop.
+    Otherwise: the first later stop in a different city than today's."""
+    today_city = itinerary_city(today)                  # also refreshes the cached sheet
+    stops = sorted((s for v in _itin.get("stops", {}).values() for s in v),
+                   key=lambda s: (s["date"], s["row"]))
+    same = lambda a, b: a.strip().lower() == b.strip().lower()
+    if move_day and today_city:
+        mine = [s for s in stops if s["date"] <= today and same(s["city"], today_city)]
+        return mine[-1] if mine else None
+    later = [s for s in stops if s["date"] > today and not (today_city and same(s["city"], today_city))]
+    return later[0] if later else None
+
+
+_geo_lock = threading.Lock()
+_nom_lock = threading.Lock()
+_nom_last = [0.0]
+
+
+def _geocache_read():
+    try:
+        return json.loads(GEOCACHE_FILE.read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def _geocache_put(key, val):
+    with _geo_lock:
+        data = _geocache_read()
+        data[key] = val
+        if len(data) > 300:
+            data = dict(list(data.items())[-300:])
+        try:
+            RUN_DIR.mkdir(parents=True, exist_ok=True)
+            tmp = GEOCACHE_FILE.with_suffix(".tmp")
+            tmp.write_text(json.dumps(data))
+            os.replace(tmp, GEOCACHE_FILE)
+        except OSError:
+            pass
+
+
+def nominatim(query, near=None):
+    """OpenStreetMap search, at most one request a second (their usage policy). With near=(lat, lon)
+    the search is limited to a box about 90 km wide around it, which finds country roads and
+    campgrounds that a free-text 'street, town, state' query misses. Returns (lat, lon, kind)
+    where kind is 'address' (a house or business) or 'street' (only the road was found), or None."""
+    with _nom_lock:
+        wait = 1.1 - (time.time() - _nom_last[0])
+        if wait > 0:
+            time.sleep(wait)
+        _nom_last[0] = time.time()
+    params = {"q": query, "format": "jsonv2", "limit": 1}
+    if near:
+        d = 0.4                                          # degrees, about 44 km each way
+        params.update(viewbox=f"{near[1] - d},{near[0] + d},{near[1] + d},{near[0] - d}", bounded=1)
+    res = http_json(f"{NOMINATIM_URL}?{urllib.parse.urlencode(params)}")
+    if not res:
+        return None
+    kind = "street" if res[0].get("addresstype") in ("road", "highway", "street") else "address"
+    return float(res[0]["lat"]), float(res[0]["lon"]), kind
+
+
+def _city_point(city):
+    if city in _geo:
+        return _geo[city][0], _geo[city][1]
+    found = geocode(city)                               # Open-Meteo, same lookup the weather uses
+    if found:
+        _geo[city] = found
+        return found[0], found[1]
+    got = nominatim(city)
+    return (got[0], got[1]) if got else None
+
+
+def resolve_stop(stop):
+    """Blocking. {'lat','lon','precision'}: precision is 'address', 'street' or 'city', the best the
+    lookups could do. Tries the address as written, then the street alone inside a box around the
+    city (campgrounds and rural roads often are not filed under the town the sheet names), then
+    the city centre. A hit more than 80 km from the city is treated as the wrong place."""
+    errs = []
+
+    def attempt(key, fn):
+        hit = _geocache_read().get(key)
+        if hit:
+            return hit
+        try:
+            got = fn()
+        except Exception as e:
+            errs.append(str(e) or type(e).__name__)
+            return None
+        if got:
+            _geocache_put(key, list(got))
+            return list(got)
+        return None
+
+    try:
+        cpt = _city_point(stop["city"])
+    except Exception as e:
+        cpt, _ = None, errs.append(str(e) or type(e).__name__)
+    addr = stop["address"]
+    if addr:
+        def as_written():
+            got = nominatim(addr)
+            if got and cpt and _km({"lat": got[0], "lon": got[1]}, {"lat": cpt[0], "lon": cpt[1]}) > 80:
+                return None
+            return got
+
+        hit = attempt("addr:" + addr.lower(), as_written)
+        if not hit and cpt:
+            street = addr.split(",")[0].strip()
+            for q in dict.fromkeys([street, re.sub(r"^\d+[a-zA-Z]?\s+", "", street)]):
+                hit = attempt("box:%s@%.1f,%.1f" % (q.lower(), cpt[0], cpt[1]), lambda q=q: nominatim(q, near=cpt))
+                if hit:
+                    break
+        if hit:
+            return {"lat": hit[0], "lon": hit[1], "precision": hit[2]}
+    if cpt:
+        return {"lat": cpt[0], "lon": cpt[1], "precision": "city"}
+    raise LookupError("could not place " + (addr or stop["city"]) + (" (" + "; ".join(errs) + ")" if errs else ""))
+
+
+def osrm_route(a, b):
+    """Car route a -> b, both (lat, lon). OSRM's public demo server ignores RV height and length
+    limits, so treat the miles and minutes as a rough guide."""
+    url = (f"{OSRM_URL}/{a[1]:.5f},{a[0]:.5f};{b[1]:.5f},{b[0]:.5f}"
+           "?overview=full&geometries=geojson&steps=false")
+    j = http_json(url, timeout=20)
+    if j.get("code") != "Ok" or not j.get("routes"):
+        raise ValueError("routing: " + str(j.get("message") or j.get("code")))
+    r = j["routes"][0]
+    return {"coords": [[c[1], c[0]] for c in r["geometry"]["coordinates"]],
+            "miles": r["distance"] / 1609.344, "minutes": r["duration"] / 60.0}
+
+
+def crop_route(coords, center, radius_km):
+    """Keep only the parts of the route within radius_km of center (plus one point either side,
+    so lines still leave the screen). A route that leaves and re-enters comes back as several
+    separate segments."""
+    pts = [{"lat": c[0], "lon": c[1]} for c in coords]
+    near = [_km(center, p) <= radius_km for p in pts]
+    n = len(pts)
+    segs, cur = [], []
+    for i in range(n):
+        if near[i] or (i > 0 and near[i - 1]) or (i < n - 1 and near[i + 1]):
+            cur.append([round(coords[i][0], 5), round(coords[i][1], 5)])
+        elif cur:
+            segs.append(cur)
+            cur = []
+    if cur:
+        segs.append(cur)
+    return [s for s in segs if len(s) > 1]
+
+
+def route_job(stop, lat, lon):
+    pt = resolve_stop(stop)
+    a, b = (lat, lon), (pt["lat"], pt["lon"])
+    here = {"lat": lat, "lon": lon}
+    try:
+        r = osrm_route(a, b)
+        return {"point": pt, "route": {
+            "segments": crop_route(r["coords"], here, ROUTE_CROP_KM),
+            "miles": round(r["miles"], 1), "minutes": round(r["minutes"]), "straight": False}}
+    except Exception as e:
+        line_mi = round(_km(here, {"lat": b[0], "lon": b[1]}) * 0.621371, 1)
+        raise Partial({"point": pt, "route": {
+            "segments": [[[a[0], a[1]], [b[0], b[1]]]], "miles": line_mi, "minutes": None,
+            "straight": True}}, "route service: " + (str(e) or type(e).__name__))
+
+
+async def get_nav():
+    """Where the Mac is, where it is headed, and the route between them (None when TV_NAV=off)."""
+    if not NAV_ON:
+        return None
+    loc = await current_location()
+    loop = asyncio.get_running_loop()
+    move_day = bool(loc.get("schedule"))                # the Mac and today's sheet row disagree by > 50 km
+    stop = None
+    if ITIN_SOURCES:
+        stop = await loop.run_in_executor(None, pick_target, datetime.date.today(), move_day)
+    out = {"here": {"lat": loc["lat"], "lon": loc["lon"], "label": loc["label"], "source": loc["source"]},
+           "move_day": move_day, "target": None, "route": None, "error": None}
+    if stop:
+        target = {"label": stop["city"], "address": stop["address"], "date": stop["date"].isoformat()}
+        key = (round(loc["lat"], 2), round(loc["lon"], 2), stop["city"].lower(), stop["address"].lower())
+        value, error, _at = _route_bg.get(key, lambda: route_job(stop, loc["lat"], loc["lon"]))
+        if value:
+            target.update(lat=value["point"]["lat"], lon=value["point"]["lon"],
+                          precision=value["point"]["precision"])
+            out["route"] = value["route"]
+        out["error"] = error
+        out["target"] = target
+    return out
+
+
+# ---- tides: nearest NOAA prediction station ----------------------------------------
+def tide_stations():
+    try:
+        if time.time() - TIDE_STATIONS_FILE.stat().st_mtime < 30 * 86400:
+            return json.loads(TIDE_STATIONS_FILE.read_text())
+    except (OSError, ValueError):
+        pass
+    try:
+        j = http_json(TIDE_STATIONS_URL, timeout=30)
+        out = []
+        for s in j.get("stations", []):
+            lat, lon = s.get("lat"), s.get("lng", s.get("lon"))
+            if lat is not None and lon is not None and s.get("id"):
+                out.append({"id": str(s["id"]), "name": s.get("name") or str(s["id"]),
+                            "lat": float(lat), "lon": float(lon)})
+        RUN_DIR.mkdir(parents=True, exist_ok=True)
+        TIDE_STATIONS_FILE.write_text(json.dumps(out, separators=(",", ":")))
+        return out
+    except Exception:
+        try:                                            # an old list beats none
+            return json.loads(TIDE_STATIONS_FILE.read_text())
+        except (OSError, ValueError):
+            raise
+
+
+def tides_job(lat, lon, today):
+    here = {"lat": lat, "lon": lon}
+    best, best_km = None, None
+    for s in tide_stations():
+        d = _km(here, s)
+        if best_km is None or d < best_km:
+            best, best_km = s, d
+    if best is None or best_km > TIDE_MAX_KM:
+        return {"station": None}                        # inland: the widget hides the row
+    q = urllib.parse.urlencode({
+        "product": "predictions", "application": "rv-tv", "datum": "MLLW", "station": best["id"],
+        "begin_date": today.strftime("%Y%m%d"),
+        "end_date": (today + datetime.timedelta(days=1)).strftime("%Y%m%d"),
+        "time_zone": "lst_ldt", "interval": "hilo", "units": "english", "format": "json"})
+    j = http_json(f"{TIDE_DATA_URL}?{q}", timeout=15)
+    preds = j.get("predictions")
+    if not preds:
+        raise ValueError("tides: " + str((j.get("error") or {}).get("message", "no predictions")))
+    return {"station": best["name"], "id": best["id"], "miles": round(best_km * 0.621371),
+            "events": [{"t": p["t"], "v": round(float(p["v"]), 1), "type": p["type"]} for p in preds]}
+
+
+async def get_tides():
+    if not NAV_ON:
+        return None
+    loc = await current_location()
+    today = datetime.date.today()
+    key = (round(loc["lat"], 1), round(loc["lon"], 1), today.isoformat())
+    value, error, at = _tide_bg.get(key, lambda: tides_job(loc["lat"], loc["lon"], today))
+    if value is None:
+        return {"station": None, "error": error} if error else None
+    return {**value, "error": error, "updated": at}
+
+
+async def _soft(coro, what):
+    """Run an optional part of /display/data; a failure there must not blank the weather or TV."""
+    try:
+        return await coro
+    except Exception as e:
+        log.warning("%s failed: %s", what, e)
+        return None
+
+
+# ==== end NAV =========================================================================
+
+
 @app.get("/whoami")
 async def whoami(who: Who = Depends(need(None))):
     return {"name": who.name, "admin": who.admin,
@@ -674,7 +1045,10 @@ async def display_page():
 
 @app.get("/display/data")
 async def display_data(who: Who = Depends(need("display_data"))):
-    return {"now": time.time(), "tv": await status(who), "weather": await get_weather()}
+    out = {"now": time.time(), "tv": await status(who), "weather": await get_weather()}
+    out["nav"] = await _soft(get_nav(), "nav")
+    out["tides"] = await _soft(get_tides(), "tides")
+    return out
 
 
 @app.get("/display/state")

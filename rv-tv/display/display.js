@@ -1,6 +1,8 @@
 // Dashboard shell. Widgets are plain modules in widgets/<id>.js listed in layout.json:
-//   export default { init(el, cfg), render(el, data), tick(el) }   (all optional)
+//   export default { init(el, cfg), render(el, data), tick(el) }   (all optional; init may be async)
 // init runs once, render runs whenever new data arrives (every 15 s), tick runs every second.
+// layout.json places a widget with "col" and "row" (CSS grid-column / grid-row values, e.g.
+// "7 / span 6" and "2"), or just "span": N for the old flow layout.
 const token = location.hash.slice(1);
 const grid = document.getElementById('grid');
 const banner = document.getElementById('banner');
@@ -23,6 +25,11 @@ function paintSky() {
   document.documentElement.style.setProperty('--sky-bottom', bottom);
 }
 
+function broke(el, cfg, e) {
+  el.classList.add('broken');
+  el.textContent = 'Widget "' + cfg.id + '" failed: ' + e.message;
+}
+
 async function start() {
   let layout;
   try {
@@ -31,16 +38,14 @@ async function start() {
   for (const cfg of layout.widgets) {
     const el = document.createElement('section');
     el.className = 'widget widget-' + cfg.id;
-    el.style.gridColumn = 'span ' + (cfg.span || 4);
+    el.style.gridColumn = cfg.col || 'span ' + (cfg.span || 4);
+    if (cfg.row) el.style.gridRow = cfg.row;
     grid.appendChild(el);
     try {
       const mod = (await import('/display/static/widgets/' + cfg.id + '.js')).default;
-      if (mod.init) mod.init(el, cfg);
       widgets.push({ mod, el });
-    } catch (e) {
-      el.classList.add('broken');
-      el.textContent = 'Widget "' + cfg.id + '" failed: ' + e.message;
-    }
+      if (mod.init) Promise.resolve(mod.init(el, cfg)).catch(e => broke(el, cfg, e));   // does not hold up the others
+    } catch (e) { broke(el, cfg, e); }
   }
   paintSky(); poll();
   setInterval(poll, 15000);
