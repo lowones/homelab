@@ -1126,7 +1126,14 @@ async def display_open(tv: bool = Query(True), page: str = Query("dashboard", pa
     if page == "sheet" and not SHEET_URL:
         raise HTTPException(404, "no sheet configured: add TV_SHEET_URL=<link> to tv.env and restart")
     async with get_lock("display"):
-        return await _display_open(tv, page)
+        out = await _display_open(tv, page)
+    if page == "dashboard" and COPY_ON_OPEN and isinstance(out, dict):
+        try:                                      # best effort: never let the clipboard break opening
+            out["copied"] = (await copy_destination())["copied"]
+        except Exception as e:
+            out["copied"] = None
+            log.info("destination not copied on open: %s", getattr(e, "detail", e))
+    return out
 
 
 async def _display_open(tv, page="dashboard"):
@@ -1231,11 +1238,13 @@ async def set_location(place: str = Query("", max_length=80),
     return loc
 
 
-@app.post("/display/copy-address")
-async def copy_address(who: Who = Depends(need("display"))):
-    """Copies the destination address (sheet column K of the target: today's row on a move day,
-    otherwise the next stop) to the Mac's clipboard. Universal Clipboard then lets you paste it
-    on a phone signed in to the same Apple ID."""
+COPY_ON_OPEN = os.environ.get("TV_COPY_ON_OPEN", "on").strip().lower() not in ("off", "0", "no", "false")
+
+
+async def copy_destination():
+    """Puts the destination address (sheet column K of the target: today's row on a move day,
+    otherwise the next stop) on the Mac's clipboard with pbcopy, so Universal Clipboard can hand
+    it to a phone signed in to the same Apple ID. Returns {"copied", "label", "date"}."""
     nav = await get_nav()
     t = (nav or {}).get("target") or {}
     text = t.get("address") or t.get("label")
@@ -1252,8 +1261,15 @@ async def copy_address(who: Who = Depends(need("display"))):
         await asyncio.get_running_loop().run_in_executor(None, run)
     except Exception as e:
         raise HTTPException(500, "could not use the clipboard: %s" % e)
-    log.info("%s: copied destination %r", who.name, text)
     return {"copied": text, "label": t.get("label"), "date": t.get("date")}
+
+
+@app.post("/display/copy-address")
+async def copy_address(who: Who = Depends(need("display"))):
+    """Copies the destination address to the Mac's clipboard (see copy_destination)."""
+    res = await copy_destination()
+    log.info("%s: copied destination %r", who.name, res["copied"])
+    return res
 
 
 if DISPLAY_DIR.is_dir():
