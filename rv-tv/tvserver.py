@@ -1630,7 +1630,6 @@ form button{padding:12px 14px}
  <button class="on" data-act="display" onclick="go('/display/open','Waking the TV and opening the dashboard (up to 40 s)...')">BatBoard</button>
  <button data-act="display" onclick="go('/display/open?page=sheet','Opening the sheet on the Mac (up to 40 s)...')">SNOW</button>
  <button data-act="display" onclick="go('/display/close','Closing the screen...')">Close screen</button>
- <button data-act="display" onclick="copyDest()">Copy destination</button>
  <button data-act="display" onclick="view('cam')">BatCam</button>
 </div>
 <form data-act="admin" onsubmit="setPlace(event)">
@@ -1709,14 +1708,6 @@ async function home(){
   view('main');
   try{await api('POST','/display/batcam/close')}catch(e){}
   setTimeout(refresh,800);
-}
-async function copyDest(){
-  show('Copying the destination on the Mac...');
-  try{
-    var r=await api('POST','/display/copy-address');
-    if(!r.ok){show(r.j.detail||('Could not copy ('+r.status+')'));return}
-    show('Copied on the Mac: '+r.j.copied+'. Paste it here in a few seconds.');
-  }catch(e){show('Cannot reach the TV box. Are you on the RV Wi-Fi?')}
 }
 async function setPlace(ev){
   ev.preventDefault();
