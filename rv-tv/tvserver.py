@@ -1133,6 +1133,13 @@ async def display_open(tv: bool = Query(True), page: str = Query("dashboard", pa
         except Exception as e:
             out["copied"] = None
             log.info("destination not copied on open: %s", getattr(e, "detail", e))
+    if page == "dashboard" and TEXT_TO and isinstance(out, dict):
+        try:                                      # best effort too
+            res = await text_destination()
+            out["texted"] = res.get("sent") or res.get("skipped")
+        except Exception as e:
+            out["texted"] = "failed: %s" % e
+            log.warning("destination not texted on open: %s", e)
     return out
 
 
@@ -1264,6 +1271,126 @@ async def copy_destination():
     return {"copied": text, "label": t.get("label"), "date": t.get("date")}
 
 
+# ---- text the destination to friends (iMessage through the Messages app on the Mac) ----------
+TEXT_TO = [x.strip() for x in os.environ.get("TV_TEXT_TO", "").split(",") if x.strip()]
+TEXT_MODE = os.environ.get("TV_TEXT_MODE", "move").strip().lower()
+try:
+    TEXT_MIN_GAP = float(os.environ.get("TV_TEXT_MIN_GAP", "300"))
+except ValueError:
+    TEXT_MIN_GAP = 300.0
+TEXT_FILE = STATE_FILE.parent / "text_sent.json"
+IMESSAGE_SCRIPT = """on run argv
+  set theTo to item 1 of argv
+  set theMsg to item 2 of argv
+  tell application "Messages"
+    set svc to 1st service whose service type = iMessage
+    try
+      set theBuddy to buddy theTo of svc
+    on error
+      set theBuddy to participant theTo of svc
+    end try
+    send theMsg to theBuddy
+  end tell
+end run"""
+
+
+def text_state():
+    try:
+        return json.loads(TEXT_FILE.read_text())
+    except (FileNotFoundError, ValueError):
+        return {}
+
+
+def text_save(**kv):
+    fd = os.open(str(TEXT_FILE), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        json.dump(kv, f)
+
+
+def text_body(nav):
+    t = nav["target"]
+    when = ""
+    if t.get("date"):
+        try:
+            d = datetime.date.fromisoformat(t["date"])
+            when = " (%s %d)" % (d.strftime("%a %b"), d.day)
+        except ValueError:
+            pass
+    addr = t.get("address") or t.get("label")
+    if nav.get("move_day"):
+        lines = ["Move day: heading to %s" % (t.get("label") or addr)]
+    else:
+        lines = ["Next stop%s: %s" % (when, t.get("label") or addr)]
+    if t.get("address"):
+        lines.append(t["address"])
+    r = nav.get("route") or {}
+    if r.get("miles") and not r.get("straight"):
+        mins = r.get("minutes")
+        frm = (nav.get("here") or {}).get("label")
+        lines.append("%s mi%s%s" % (int(round(r["miles"])), (", about %dh %02dm" % (mins // 60, mins % 60)) if mins else "",
+                                    (" from " + frm) if frm else ""))
+    lines.append("https://maps.apple.com/?dirflg=d&daddr=" + urllib.parse.quote(addr))
+    return "\n".join(lines)
+
+
+def send_imessage(to, body):
+    try:
+        r = subprocess.run(["osascript", "-e", IMESSAGE_SCRIPT, to, body], capture_output=True, text=True, timeout=45)
+    except FileNotFoundError:
+        raise RuntimeError("osascript not found: texting only works on the Mac")
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("Messages did not answer in 45 s: is there a permission prompt on the Mac's screen?")
+    if r.returncode != 0:
+        err = (r.stderr or "").strip()
+        if "-1743" in err or "not authorized" in err.lower():
+            err = "not allowed to control Messages: System Settings > Privacy & Security > Automation, allow it. (%s)" % err[:120]
+        raise RuntimeError(err[:300] or "osascript failed")
+
+
+async def text_destination(force=False):
+    """Texts the destination to TV_TEXT_TO. Returns {"sent": [...]} or {"skipped": reason}."""
+    if not TEXT_TO:
+        return {"skipped": "TV_TEXT_TO is not set"}
+    if TEXT_MODE not in ("move", "always") and not force:
+        return {"skipped": "texting is off (TV_TEXT_MODE=%s)" % TEXT_MODE}
+    nav = await get_nav()
+    t = (nav or {}).get("target") or {}
+    if not (t.get("address") or t.get("label")):
+        return {"skipped": "no destination in the itinerary"}
+    st, now = text_state(), time.time()
+    key = "%s|%s" % (datetime.date.today().isoformat(), t.get("address") or t.get("label"))
+    if force:
+        if now - st.get("at", 0) < 30:
+            return {"skipped": "texted %d s ago" % (now - st["at"])}
+    elif TEXT_MODE == "move":
+        if not nav.get("move_day"):
+            return {"skipped": "not a move day"}
+        if st.get("key") == key:
+            return {"skipped": "already texted today"}
+    elif now - st.get("at", 0) < TEXT_MIN_GAP:
+        return {"skipped": "texted %d s ago (minimum gap %d s)" % (now - st["at"], TEXT_MIN_GAP)}
+    body = text_body(nav)
+    loop = asyncio.get_running_loop()
+    for to in TEXT_TO:
+        await loop.run_in_executor(None, send_imessage, to, body)
+    text_save(key=key, at=now)
+    log.info("texted destination %r to %d recipient(s)", t.get("address") or t.get("label"), len(TEXT_TO))
+    return {"sent": TEXT_TO, "text": body}
+
+
+@app.post("/display/text-address")
+async def text_address(who: Who = Depends(need("display"))):
+    """Texts the destination (address + maps link) to TV_TEXT_TO right now."""
+    if not TEXT_TO:
+        raise HTTPException(400, "no recipient: add TV_TEXT_TO=+1... to tv.env and restart")
+    try:
+        res = await text_destination(force=True)
+    except RuntimeError as e:
+        raise HTTPException(500, "could not send the text: %s" % e)
+    log.info("%s: text-address %s", who.name, "sent" if "sent" in res else res)
+    return res
+
+
 @app.post("/display/copy-address")
 async def copy_address(who: Who = Depends(need("display"))):
     """Copies the destination address to the Mac's clipboard (see copy_destination)."""
@@ -1321,6 +1448,7 @@ form button{padding:12px 14px}
  <button data-act="display" onclick="go('/display/open?page=sheet','Opening the sheet on the Mac (up to 40 s)...')">Open sheet</button>
  <button data-act="display" onclick="go('/display/close','Closing the screen...')">Close screen</button>
  <button data-act="display" onclick="copyDest()">Copy destination</button>
+ <button data-act="display" onclick="textDest()">Text destination</button>
 </div>
 <form data-act="admin" onsubmit="setPlace(event)">
  <input id="place" placeholder="Weather place, e.g. Moab, Utah" autocomplete="off">
@@ -1354,6 +1482,14 @@ async function go(path,msg){
     if(!r.ok){show('Something went wrong: '+(r.j.detail||r.status));return}
   }catch(e){show('Cannot reach the TV box. Are you on the RV Wi-Fi?');return}
   setTimeout(refresh,1500);
+}
+async function textDest(){
+  show('Texting the destination...');
+  try{
+    var r=await api('POST','/display/text-address');
+    if(!r.ok){show(r.j.detail||('Could not send ('+r.status+')'));return}
+    show(r.j.sent?('Texted '+r.j.sent.length+' recipient(s).'):('Not sent: '+r.j.skipped));
+  }catch(e){show('Cannot reach the TV box. Are you on the RV Wi-Fi?')}
 }
 async function copyDest(){
   show('Copying the destination on the Mac...');
