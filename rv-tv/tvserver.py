@@ -557,6 +557,52 @@ def batcam_open(page):
     return {"batcam": "open", "page": page, "url": url, "fullscreen": fullscreen}
 
 
+# JavaScript run inside the Safari window by AppleScript's "do JavaScript". Single quotes only.
+BATCAM_JS = {
+    "top": "(function(){window.scrollTo({top:0,behavior:'smooth'});return 'ok top';})()",
+    "bottom": "(function(){window.scrollTo({top:document.documentElement.scrollHeight,behavior:'smooth'});return 'ok bottom';})()",
+}
+# PAST / NEW: click the left (25%) or right (75%) of the camera image that is mostly in view. The
+# page listens for a click on the <img id="...Image"> and compares clientX with the image's middle.
+BATCAM_STEP_JS = ("(function(side){"
+                  "var imgs=[].slice.call(document.querySelectorAll('img.image')).filter(function(i){return /Image$/.test(i.id);});"
+                  "if(!imgs.length)return 'no-camera';"
+                  "var vh=window.innerHeight,best=null,bv=0;"
+                  "imgs.forEach(function(i){var r=i.getBoundingClientRect();var v=Math.min(r.bottom,vh)-Math.max(r.top,0);if(v>bv){bv=v;best=i;}});"
+                  "if(!best)return 'no-camera-in-view';"
+                  "var r=best.getBoundingClientRect();"
+                  "var x=r.left+r.width*(side==='past'?0.25:0.75);"
+                  "var y=(Math.max(r.top,0)+Math.min(r.bottom,vh))/2;"
+                  "best.dispatchEvent(new MouseEvent('click',{bubbles:true,cancelable:true,view:window,clientX:x,clientY:y}));"
+                  "return 'ok '+best.id+' '+side;"
+                  "})('__SIDE__')")
+SAFARI_JS = """on run argv
+  set wid to (item 1 of argv) as integer
+  set js to item 2 of argv
+  tell application "Safari" to return do JavaScript js in current tab of window id wid
+end run"""
+
+
+def batcam_do(action):
+    """Scroll or click inside the BatCam Safari window. Blocking.
+    LookupError: no BatCam window. RuntimeError: Safari refused (message is for the phone)."""
+    wid = _display.get("batcam")
+    if not wid:
+        raise LookupError("BatCam is not open: press Load first")
+    js = BATCAM_JS.get(action) or BATCAM_STEP_JS.replace("__SIDE__", action)
+    try:
+        return _osa(SAFARI_JS, wid, js, timeout=15)
+    except RuntimeError as e:
+        low = str(e).lower()
+        if "apple events" in low and "javascript" in low:
+            raise RuntimeError("Safari is blocking scripts. On the Mac: Safari > Settings > Advanced > Show features for "
+                               "web developers, then Develop > Allow JavaScript from Apple Events.")
+        if "can't get window" in low or "-1728" in low:
+            _display["batcam"] = None
+            raise RuntimeError("The BatCam window is gone: press Load.")
+        raise
+
+
 def load_location():
     """The saved (manual) place plus the mode: 'auto' follows the itinerary when one is set."""
     try:
@@ -1312,6 +1358,21 @@ async def batcam_close_endpoint(who: Who = Depends(need("display"))):
     return {"batcam": "closed", "was_open": was}
 
 
+@app.post("/display/batcam/do")
+async def batcam_do_endpoint(action: str = Query(..., pattern="^(top|bottom|past|new)$"),
+                             who: Who = Depends(need("display"))):
+    """top / bottom scroll the BatCam window; past / new click the left / right side of the
+    camera image on screen (older / newer frame). Result text comes from the page."""
+    async with get_lock("display"):
+        try:
+            res = await asyncio.get_running_loop().run_in_executor(None, batcam_do, action)
+        except LookupError as e:
+            raise HTTPException(409, str(e))
+        except RuntimeError as e:
+            raise HTTPException(500, str(e))
+    return {"action": action, "result": res}
+
+
 def geocode(place):
     """'Moab, Utah' -> (lat, lon, 'Moab, Utah'). Blocking; run in a thread."""
     name, _, hint = place.partition(",")
@@ -1584,6 +1645,14 @@ form button{padding:12px 14px}
  <button class="on" data-act="display" onclick="go('/display/batcam?page=watch','Opening the cameras in Safari (up to 40 s)...')">Load</button>
 </div>
 <div class="grid">
+ <button data-act="display" onclick="cam('top')">Top</button>
+ <button data-act="display" onclick="cam('bottom')">Bottom</button>
+</div>
+<div class="grid">
+ <button data-act="display" onclick="cam('past')">PAST</button>
+ <button data-act="display" onclick="cam('new')">NEW</button>
+</div>
+<div class="grid">
  <button class="wide" data-act="display" onclick="home()">Home</button>
 </div>
 </div>
@@ -1622,6 +1691,19 @@ function view(v){
   document.getElementById('title').textContent=cam?'BatCam':'RV TV';
   document.title=cam?'BatCam':'RV TV';
   if(cam)show('BatCam: press Login if the cameras say 401, then Load.');else refresh();
+}
+var CAMSAY={top:'Top',bottom:'Bottom',past:'PAST',new:'NEW'};
+async function cam(action){
+  show(CAMSAY[action]+'...');
+  try{
+    var r=await api('POST','/display/batcam/do?action='+action);
+    if(r.status==401){show('This link is not valid any more. Ask Devon for a new one.');return}
+    if(r.status==403){show('Not allowed for your link.');return}
+    if(!r.ok){show(r.j.detail||('Could not do that ('+r.status+')'));return}
+    var t=r.j.result||'';
+    if(t.indexOf('no-camera')==0){show('The cameras page is not showing. Press Load first.');return}
+    show(CAMSAY[action]+(t.indexOf('ok ')==0?'':' ('+t+')'));
+  }catch(e){show('Cannot reach the TV box. Are you on the RV Wi-Fi?')}
 }
 async function home(){
   view('main');
