@@ -1,11 +1,12 @@
-// Satellite map, centred on the Mac's own location and about `miles` (layout.json, default 50)
+// Satellite map, centred on the Mac's own location and about `data.map.miles` (a server setting: POST /display/map?miles=N, default 35;
+// layout.json `miles` is only a fallback)
 // across its shorter side. When a whole edge of the view is open water (the coast), the view is
 // slid toward the land (fitLand) while the position dot stays at least 15% in from the edge. Red pins are past hikes (display/pins.json, made by
 // tools/make_pins.py); the amber line is the drive to the next stop. Leaflet is vendored under
 // display/vendor/, so only the imagery tiles need internet: with the link down the map keeps
 // its pins, route and position on a dark background and says so.
 const BASE = '/display/static/';
-const S = { map: null, here: null, targetMark: null, line: [], key: '', routeKey: '', miles: 50, rem: 24, fitId: 0,
+const S = { map: null, here: null, targetMark: null, line: [], key: '', routeKey: '', miles: 35, rem: 24, fitId: 0,
             loads: 0, errors: 0, note: null };
 
 function loadCss(href) {
@@ -145,7 +146,7 @@ async function fitLand(map, size, z, id) {
 
 export default {
   async init(el, cfg) {
-    S.miles = (cfg && cfg.miles) || 50;
+    S.miles = (cfg && cfg.miles) || 35;
     S.rem = parseFloat(getComputedStyle(document.documentElement).fontSize) || 24;
     const canvas = document.createElement('div'); canvas.className = 'map-canvas';
     S.note = document.createElement('div'); S.note.className = 'map-note'; S.note.hidden = true;
@@ -179,6 +180,8 @@ export default {
     if (!nav || !nav.here) { say('Waiting for a location fix'); return; }
     if (S.note && S.note.textContent.startsWith('Waiting')) say('');
 
+    const m = data.map && Number(data.map.miles);
+    if (m > 0) S.miles = m;                          // the server's setting wins; changing it recentres below
     map.invalidateSize({ pan: false });
     const size = map.getSize();
     const h = nav.here;

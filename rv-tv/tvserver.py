@@ -1057,11 +1057,57 @@ async def display_page():
     return FileResponse(DISPLAY_DIR / "index.html")
 
 
+# ---- map zoom: how many miles the dashboard map spans (shorter side). A setting, like the weather
+# place: default from TV_MAP_MILES (35), changed by POST /display/map, kept in .run/map.json.
+MAP_MILES_MIN, MAP_MILES_MAX = 5.0, 500.0
+
+
+def _clean_miles(v, fallback):
+    try:
+        v = float(v)
+    except (TypeError, ValueError):
+        return fallback
+    if not (MAP_MILES_MIN <= v <= MAP_MILES_MAX):
+        return fallback
+    return int(v) if v == int(v) else round(v, 1)
+
+
+MAP_MILES_DEFAULT = _clean_miles(os.environ.get("TV_MAP_MILES", "35"), 35)
+MAP_FILE = STATE_FILE.parent / "map.json"
+
+
+def get_map():
+    try:
+        miles = _clean_miles(json.loads(MAP_FILE.read_text()).get("miles"), MAP_MILES_DEFAULT)
+    except (FileNotFoundError, ValueError, AttributeError):
+        miles = MAP_MILES_DEFAULT
+    return {"miles": miles, "default": MAP_MILES_DEFAULT}
+
+
+@app.post("/display/map")
+async def set_map(miles: float = Query(None, ge=5, le=500), reset: bool = Query(False),
+                  who: Who = Depends(need("display"))):
+    """How wide the dashboard map is, in miles: /display/map?miles=25, or ?reset=true for the default."""
+    if reset:
+        try:
+            MAP_FILE.unlink()
+        except FileNotFoundError:
+            pass
+    elif miles is None:
+        raise HTTPException(400, "give miles=<%d-%d> or reset=true" % (MAP_MILES_MIN, MAP_MILES_MAX))
+    else:
+        fd = os.open(str(MAP_FILE), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
+            json.dump({"miles": _clean_miles(miles, MAP_MILES_DEFAULT)}, f)
+    return get_map()
+
+
 @app.get("/display/data")
 async def display_data(who: Who = Depends(need("display_data"))):
     out = {"now": time.time(), "tv": await status(who), "weather": await get_weather()}
     out["nav"] = await _soft(get_nav(), "nav")
     out["tides"] = await _soft(get_tides(), "tides")
+    out["map"] = get_map()
     return out
 
 
