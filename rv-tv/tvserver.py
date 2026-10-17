@@ -1231,6 +1231,31 @@ async def set_location(place: str = Query("", max_length=80),
     return loc
 
 
+@app.post("/display/copy-address")
+async def copy_address(who: Who = Depends(need("display"))):
+    """Copies the destination address (sheet column K of the target: today's row on a move day,
+    otherwise the next stop) to the Mac's clipboard. Universal Clipboard then lets you paste it
+    on a phone signed in to the same Apple ID."""
+    nav = await get_nav()
+    t = (nav or {}).get("target") or {}
+    text = t.get("address") or t.get("label")
+    if not text:
+        raise HTTPException(404, "no destination found in the itinerary")
+    import shutil as _sh
+    if not _sh.which("pbcopy"):
+        raise HTTPException(501, "pbcopy not found: copying only works on the Mac")
+
+    def run():
+        subprocess.run(["pbcopy"], input=text.encode("utf-8"), timeout=5, check=True,
+                       env={**os.environ, "LC_ALL": "en_US.UTF-8"})
+    try:
+        await asyncio.get_running_loop().run_in_executor(None, run)
+    except Exception as e:
+        raise HTTPException(500, "could not use the clipboard: %s" % e)
+    log.info("%s: copied destination %r", who.name, text)
+    return {"copied": text, "label": t.get("label"), "date": t.get("date")}
+
+
 if DISPLAY_DIR.is_dir():
     app.mount("/display/static", StaticFiles(directory=str(DISPLAY_DIR)), name="display-static")
 
@@ -1279,6 +1304,7 @@ form button{padding:12px 14px}
  <button class="on" data-act="display" onclick="go('/display/open','Waking the TV and opening the dashboard (up to 40 s)...')">Show dashboard</button>
  <button data-act="display" onclick="go('/display/open?page=sheet','Opening the sheet on the Mac (up to 40 s)...')">Open sheet</button>
  <button data-act="display" onclick="go('/display/close','Closing the screen...')">Close screen</button>
+ <button data-act="display" onclick="copyDest()">Copy destination</button>
 </div>
 <form data-act="admin" onsubmit="setPlace(event)">
  <input id="place" placeholder="Weather place, e.g. Moab, Utah" autocomplete="off">
@@ -1312,6 +1338,14 @@ async function go(path,msg){
     if(!r.ok){show('Something went wrong: '+(r.j.detail||r.status));return}
   }catch(e){show('Cannot reach the TV box. Are you on the RV Wi-Fi?');return}
   setTimeout(refresh,1500);
+}
+async function copyDest(){
+  show('Copying the destination on the Mac...');
+  try{
+    var r=await api('POST','/display/copy-address');
+    if(!r.ok){show(r.j.detail||('Could not copy ('+r.status+')'));return}
+    show('Copied on the Mac: '+r.j.copied+'. Paste it here in a few seconds.');
+  }catch(e){show('Cannot reach the TV box. Are you on the RV Wi-Fi?')}
 }
 async function setPlace(ev){
   ev.preventDefault();
