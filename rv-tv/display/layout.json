@@ -1,6 +1,6 @@
 {
   "widgets": [
-    {"id": "map",      "col": "1 / span 6", "row": "1 / -1", "miles": 75},
+    {"id": "map",      "col": "1 / span 6", "row": "1 / -1", "miles": 50},
     {"id": "location", "col": "7 / span 6", "row": "1"},
     {"id": "weather",  "col": "7 / span 6", "row": "2"},
     {"id": "clock",    "col": "7 / span 6", "row": "4"},

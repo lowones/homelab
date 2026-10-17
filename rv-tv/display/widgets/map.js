@@ -1,10 +1,11 @@
-// Satellite map, centred on the Mac's own location and about `miles` (layout.json, default 75)
-// across its shorter side. Red pins are past hikes (display/pins.json, made by
+// Satellite map, centred on the Mac's own location and about `miles` (layout.json, default 50)
+// across its shorter side. When a whole edge of the view is open water (the coast), the view is
+// slid toward the land (fitLand) while the position dot stays at least 15% in from the edge. Red pins are past hikes (display/pins.json, made by
 // tools/make_pins.py); the amber line is the drive to the next stop. Leaflet is vendored under
 // display/vendor/, so only the imagery tiles need internet: with the link down the map keeps
 // its pins, route and position on a dark background and says so.
 const BASE = '/display/static/';
-const S = { map: null, here: null, targetMark: null, line: [], key: '', routeKey: '', miles: 75, rem: 24,
+const S = { map: null, here: null, targetMark: null, line: [], key: '', routeKey: '', miles: 50, rem: 24, fitId: 0,
             loads: 0, errors: 0, note: null };
 
 function loadCss(href) {
@@ -66,9 +67,85 @@ function tiles() {
   return [imagery, labels];
 }
 
+
+// ---- keep open water off the edge ------------------------------------------------------------
+// Looks at the same imagery the map shows (Esri allows reading its tiles), a couple of zoom levels
+// out so that a handful of tiles cover the view, and labels each pixel water or land. Water is dark
+// and blue-leaning; forest is green, desert and fields are red/brown, cloud and snow are grey.
+// Returns how many view pixels to pan [x, y], or null when anything is unclear.
+const IMG = 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/';
+const EDGE_RUN = 0.12;      // water must reach this far in from the edge to count
+const WATER_COL = 0.80;     // share of a column/row that must be water to count as water
+const KEEP_IN = 0.15;       // the position dot stays at least this far from the edge
+
+function loadTile(z, x, y) {
+  return new Promise(ok => {
+    const im = new Image();
+    im.crossOrigin = 'anonymous';
+    im.onload = () => ok(im); im.onerror = () => ok(null);
+    im.src = IMG + z + '/' + y + '/' + x;
+  });
+}
+function isWater(r, g, b) { return b >= g - 2 && b > r + 8 && (r + g + b) < 420; }
+
+// leading run (in samples) of water lines from the start of `frac`
+function run(frac, from, step) {
+  let n = 0;
+  for (let i = from; i >= 0 && i < frac.length && frac[i] >= WATER_COL; i += step) n++;
+  return n;
+}
+
+export async function waterShift(map, size, zView) {
+  const zs = Math.max(2, Math.min(15, Math.floor(zView) - 2));
+  const b = map.getBounds();
+  const nw = map.project(b.getNorthWest(), zs), se = map.project(b.getSouthEast(), zs);
+  const x0 = Math.floor(nw.x), y0 = Math.floor(nw.y);
+  const W = Math.max(8, Math.ceil(se.x - nw.x)), H = Math.max(8, Math.ceil(se.y - nw.y));
+  const n = 1 << zs;
+  const tx0 = Math.floor(nw.x / 256), tx1 = Math.floor((se.x - 1) / 256);
+  const ty0 = Math.max(0, Math.floor(nw.y / 256)), ty1 = Math.min(n - 1, Math.floor((se.y - 1) / 256));
+  if ((tx1 - tx0 + 1) * (ty1 - ty0 + 1) > 16) return null;
+  const jobs = [];
+  for (let ty = ty0; ty <= ty1; ty++) for (let tx = tx0; tx <= tx1; tx++)
+    jobs.push(loadTile(zs, ((tx % n) + n) % n, ty).then(im => ({ im, tx, ty })));
+  const got = await Promise.race([Promise.all(jobs), new Promise(r => setTimeout(() => r(null), 8000))]);
+  if (!got || got.some(t => !t.im)) return null;
+  const cv = document.createElement('canvas'); cv.width = W; cv.height = H;
+  const cx = cv.getContext('2d', { willReadFrequently: true });
+  got.forEach(t => cx.drawImage(t.im, t.tx * 256 - x0, t.ty * 256 - y0));
+  let px;
+  try { px = cx.getImageData(0, 0, W, H).data; } catch (e) { return null; }   // tainted: give up
+  const col = new Float32Array(W), row = new Float32Array(H);
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    const i = (y * W + x) * 4;
+    if (isWater(px[i], px[i + 1], px[i + 2])) { col[x]++; row[y]++; }
+  }
+  for (let x = 0; x < W; x++) col[x] /= H;
+  for (let y = 0; y < H; y++) row[y] /= W;
+
+  // pixels of the sample -> pixels of the view
+  const fx = size.x / W, fy = size.y / H;
+  const axis = (frac, f, len, viewLen) => {
+    const a = run(frac, 0, 1), z = run(frac, len - 1, -1);        // water at the start / the end
+    const need = EDGE_RUN * len;
+    if (a >= need && z < need) return Math.min(a * f, (0.5 - KEEP_IN) * viewLen);      // land lies ahead: pan forward
+    if (z >= need && a < need) return -Math.min(z * f, (0.5 - KEEP_IN) * viewLen);
+    return 0;
+  };
+  const dx = axis(col, fx, W, size.x), dy = axis(row, fy, H, size.y);
+  return (dx || dy) ? [Math.round(dx), Math.round(dy)] : null;
+}
+
+async function fitLand(map, size, z, id) {
+  let shift = null;
+  try { shift = await waterShift(map, size, z); } catch (e) { shift = null; }
+  if (!shift || id !== S.fitId) return;                          // nothing to do, or a newer fix arrived
+  map.panBy(shift, { animate: false });
+}
+
 export default {
   async init(el, cfg) {
-    S.miles = (cfg && cfg.miles) || 75;
+    S.miles = (cfg && cfg.miles) || 50;
     S.rem = parseFloat(getComputedStyle(document.documentElement).fontSize) || 24;
     const canvas = document.createElement('div'); canvas.className = 'map-canvas';
     S.note = document.createElement('div'); S.note.className = 'map-note'; S.note.hidden = true;
@@ -108,7 +185,9 @@ export default {
     const key = [h.lat.toFixed(3), h.lon.toFixed(3), size.x, size.y, S.miles].join();
     if (key !== S.key && size.x > 0) {               // recentre only when something actually changed
       S.key = key;
-      map.setView([h.lat, h.lon], zoomFor(h.lat, Math.min(size.x, size.y), S.miles), { animate: false });
+      const z = zoomFor(h.lat, Math.min(size.x, size.y), S.miles);
+      map.setView([h.lat, h.lon], z, { animate: false });
+      fitLand(map, size, z, ++S.fitId);
     }
     S.here.setLatLng([h.lat, h.lon]).setOpacity(1);
 
