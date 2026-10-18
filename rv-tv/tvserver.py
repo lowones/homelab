@@ -1361,7 +1361,7 @@ async def display_state(who: Who = Depends(need(None))):
     return {"open": kiosk_running(), "page": _display["page"], "browser": _display["browser"],
             "location": await current_location(), "itinerary": bool(ITIN_SOURCES),
             "itinerary_error": _itin["error"], "sheet": bool(SHEET_URL),
-            "batcam": bool(_display.get("batcam")), "cams": cam_list()}
+            "batcam": bool(_display.get("batcam")), "cams": cam_list(), "map": get_map()}
 
 
 @app.post("/display/open")
@@ -1761,6 +1761,20 @@ input{flex:1;min-width:0;padding:12px;font:inherit;border-radius:12px;border:1px
 form button{padding:12px 14px}
 .note{font-size:14px;opacity:.7;margin:0 0 10px}
 .wide{grid-column:1/-1}
+.bb{grid-column:1/-1;padding:10px 14px 4px;border-radius:12px;border:1px solid var(--acc);background:var(--card);color:var(--fg);cursor:pointer;user-select:none;-webkit-user-select:none;-webkit-tap-highlight-color:transparent}
+.bb.down{background:var(--acc);color:#fff}
+.bb-h{display:flex;justify-content:space-between;align-items:baseline;font-size:14px;font-weight:600}
+.bb-h span+span{font-weight:500;opacity:.8}
+.bb-s{margin-top:2px;cursor:default}
+.bb input{display:block;width:100%;flex:none;height:28px;margin:0;padding:0;border:0;border-radius:0;background:transparent;-webkit-appearance:none;appearance:none}
+.bb input::-webkit-slider-runnable-track{height:4px;border-radius:2px;background:var(--line)}
+.bb input::-webkit-slider-thumb{-webkit-appearance:none;box-sizing:border-box;width:24px;height:24px;margin-top:-10px;border-radius:50%;border:2px solid var(--card);background:var(--acc)}
+.bb input::-moz-range-track{height:4px;border-radius:2px;background:var(--line)}
+.bb input::-moz-range-thumb{box-sizing:border-box;width:24px;height:24px;border-radius:50%;border:2px solid var(--card);background:var(--acc)}
+.bb-ticks{position:relative;height:28px;margin:0 12px}
+.bb-ticks i{position:absolute;top:0;width:1px;height:5px;margin-left:-.5px;background:var(--fg);opacity:.45}
+.bb-ticks i.m{height:9px;opacity:.8}
+.bb-ticks b{position:absolute;top:12px;transform:translateX(-50%);font-size:11px;font-weight:500;opacity:.75}
 </style></head><body>
 <h1 id="title">RV TV</h1>
 <div id="st">Checking TV...</div>
@@ -1784,10 +1798,19 @@ form button{padding:12px 14px}
  <button data-act="input" onclick="go('/input/HDMI_1','Switching to the Mac...')">Mac screen</button>
 </div>
 <div class="grid">
- <button class="on" data-act="display" onclick="go('/display/open','Waking the TV and opening the dashboard (up to 40 s)...')">BatBoard</button>
+ <div class="bb" id="bb" role="button" tabindex="0" data-act="display" onclick="batboard()"
+      onkeydown="if(event.key==='Enter')batboard()" onpointerdown="this.classList.add('down')"
+      onpointerup="this.classList.remove('down')" onpointerleave="this.classList.remove('down')"
+      onpointercancel="this.classList.remove('down')">
+  <div class="bb-h"><span>BatBoard</span><span id="bbv">35 miles</span></div>
+  <div class="bb-s" onclick="event.stopPropagation()" onpointerdown="event.stopPropagation()">
+   <input type="range" id="bbr" min="10" max="100" step="5" value="35" aria-label="Map width in miles">
+   <div class="bb-ticks" id="bbt"></div>
+  </div>
+ </div>
  <button data-act="display" onclick="go('/display/open?page=sheet','Opening the sheet on the Mac (up to 40 s)...')">SNOW</button>
  <button data-act="display" onclick="go('/display/close','Closing the screen...')">Close screen</button>
- <button data-act="display" onclick="view('cam')">BatCam</button>
+ <button class="wide" data-act="display" onclick="view('cam')">BatCam</button>
 </div>
 <form data-act="admin" onsubmit="setPlace(event)">
  <input id="place" placeholder="Weather place, e.g. Moab, Utah" autocomplete="off">
@@ -1852,6 +1875,29 @@ async function go(path,msg){
     if(!r.ok){show('Something went wrong: '+(r.j.detail||r.status));return}
   }catch(e){show('Cannot reach the TV box. Are you on the RV Wi-Fi?');return}
   setTimeout(refresh,1500);
+}
+var BB={touched:false};
+function bbShow(){document.getElementById('bbv').textContent=document.getElementById('bbr').value+' miles'}
+function bbInit(){
+  var h='';
+  for(var m=10;m<=100;m+=5){
+    var x=((m-10)/90*100).toFixed(3);
+    h+='<i'+(m%10===0?' class="m"':'')+' style="left:'+x+'%"></i>';
+    if(m%20===10||m===100)h+='<b style="left:'+x+'%">'+m+'</b>';
+  }
+  document.getElementById('bbt').innerHTML=h;
+  document.getElementById('bbr').oninput=function(){BB.touched=true;bbShow()};
+}
+async function batboard(){
+  var m=document.getElementById('bbr').value;
+  show('Map set to '+m+' miles...');
+  try{
+    var r=await api('POST','/display/map?miles='+encodeURIComponent(m));
+    if(r.status==401){show('This link is not valid any more. Ask Devon for a new one.');return}
+    if(r.status==403){show('Not allowed for your link.');return}
+    if(!r.ok){show('Could not set the map width: '+(r.j.detail||r.status));return}
+  }catch(e){show('Cannot reach the TV box. Are you on the RV Wi-Fi?');return}
+  go('/display/open','Map '+m+' miles. Waking the TV and opening the dashboard (up to 40 s)...');
 }
 function view(v){
   var titles={main:'RV TV',cam:'BatCam',canny:'Canny'};
@@ -1930,11 +1976,12 @@ async function refresh(){
       var d=await api('GET','/display/state');
       if(d.ok&&d.j.open)line+=d.j.page==='sheet'?' - sheet open on the Mac':' - dashboard open';
       if(d.ok&&d.j.batcam)line+=' - BatCam open on the Mac';
+      if(d.ok&&d.j.map&&!BB.touched){document.getElementById('bbr').value=d.j.map.miles;bbShow()}
     }
     show(line);
   }catch(e){show('Cannot reach the TV box. Are you on the RV Wi-Fi?')}
 }
-refresh();setInterval(refresh,15000);
+bbInit();refresh();setInterval(refresh,15000);
 </script></body></html>"""
 
 
