@@ -245,6 +245,16 @@ JSEOF
 cp "$HERE/display/widgets/map.js" $T/map.mjs
 if node $T/poi_test.mjs > $T/poipick.out 2>&1; then echo "ok   map keeps only the nearest few of each kind inside the view"; else echo "FAIL pin picking (needs node)"; cat $T/poipick.out; fail=1; fi
 
+echo "-- camera tunnel agent"
+if bash "$HERE/install-cams-tunnel.sh" --print | $PY -c "
+import sys, plistlib
+d = plistlib.loads(sys.stdin.buffer.read())
+a = d['ProgramArguments']
+assert d['Label'] == 'com.lowone.camtunnel' and d['KeepAlive'] is True and d['RunAtLoad'] is True
+assert a[0] == '/usr/bin/ssh' and a[-1] == 'oracle-r' and '127.0.0.1:1984:127.0.0.1:1984' in a and 'ExitOnForwardFailure=yes' in a, a
+" 2>$T/tun.err; then echo "ok   tunnel agent plist is valid (ssh -L 1984 to oracle-r, KeepAlive)"; else echo "FAIL tunnel agent plist"; cat $T/tun.err; fail=1; fi
+if TV_CAMS_SSH_HOST=cam-host TV_CAMS_PORT=1999 bash "$HERE/install-cams-tunnel.sh" --print | grep -q '<string>cam-host</string>'; then echo "ok   tunnel host is configurable"; else echo "FAIL tunnel host override"; fail=1; fi
+
 echo "-- concurrent requests (guest page and dashboard polling at once)"
 pids=""; : > $T/par.txt
 for i in 1 2 3 4 5 6 7 8; do

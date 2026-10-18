@@ -1,0 +1,9 @@
+---
+# go2rtc on oracle: the Canny cameras' video relay for the RV TV dashboard (rv-tv/).
+#   ansible-playbook cams.yml -K
+# Before the first run, stop any go2rtc started by hand (Ctrl-C in its terminal) so port 1984 is free.
+- name: Install go2rtc (Canny camera relay)
+  hosts: go2rtc
+  become: true
+  roles:
+    - go2rtc

@@ -1,0 +1,19 @@
+# Managed by Ansible (ansible/cams, role go2rtc). Do not hand-edit.
+[Unit]
+Description=go2rtc (Canny camera relay for the RV TV)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User={{ go2rtc_user }}
+ExecStart={{ go2rtc_bin_dir }}/go2rtc -config {{ go2rtc_conf_dir }}/go2rtc.yaml
+Restart=always
+RestartSec=5
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+
+[Install]
+WantedBy=multi-user.target

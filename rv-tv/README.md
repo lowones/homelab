@@ -57,12 +57,19 @@ Close screen / Show dashboard remove it. BatCave shows as "not connected" until 
 - Video comes from **go2rtc on oracle** (house LAN). It asks each camera over ONVIF for its current
   stream address (the cameras rotate it every few minutes), so nothing is hardcoded. Config example:
   `cams/go2rtc.yaml.example`. Streams are `NAME` (full size, single view) and `NAME_sub` (640x360, grid).
-- The Mac reaches it through a tunnel: `ssh -N -L 1984:127.0.0.1:1984 oracle-r` (run in Terminal for
-  now), so go2rtc is `http://localhost:1984` on the Mac. `TV_GO2RTC_URL` overrides that.
+- The Mac reaches it through an ssh tunnel (`ssh -N -L 1984:127.0.0.1:1984 oracle-r`, kept up by the launchd
+  agent below), so go2rtc is `http://localhost:1984` on the Mac. `TV_GO2RTC_URL` overrides that.
 - `TV_CAMS_LIVE=driveway,coop` in `tv.env` lists the cameras that are set up in go2rtc (default
   `driveway`); the rest show "not connected". The page shows a red banner when the tunnel is down.
 - Endpoints: `POST /display/cams?cam=driveway|coop|barn|leanto|rv|batcave|all` (`display` permission),
   `GET /display/cams?src=...` (the page itself, no secrets).
+
+Keeping it running (survives reboots and drops):
+- **oracle:** go2rtc is a systemd service installed by Ansible: `cd ansible/cams && ansible-playbook cams.yml -K`
+  (see `ansible/cams/README.md`; cameras and their logins are configured there, not in this folder).
+- **mini:** `bash install-cams-tunnel.sh` installs a launchd agent that holds the ssh tunnel to oracle
+  (`TV_CAMS_SSH_HOST`, default `oracle-r`), starts it at login and reconnects within about 15 s.
+  `--print` shows the plist, `--remove` takes it out. Log: `.run/camtunnel.log`.
 
 ## Workflow
 1. `git switch -c my-feature`

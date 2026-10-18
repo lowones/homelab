@@ -1,0 +1,109 @@
+---
+- name: This role ships the amd64 binary only
+  ansible.builtin.assert:
+    that: ansible_facts.architecture == "x86_64"
+    fail_msg: "go2rtc_url points at the linux_amd64 build; this host is {{ ansible_facts.architecture }}"
+    quiet: true
+
+- name: Service user
+  ansible.builtin.user:
+    name: "{{ go2rtc_user }}"
+    system: true
+    create_home: false
+    shell: /usr/sbin/nologin
+
+- name: Directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  loop:
+    - "{{ go2rtc_bin_dir }}"
+    - "{{ go2rtc_conf_dir }}"
+
+- name: Install go2rtc binary (version and checksum pinned)
+  ansible.builtin.get_url:
+    url: "{{ go2rtc_url }}"
+    dest: "{{ go2rtc_bin_dir }}/go2rtc"
+    checksum: "sha256:{{ go2rtc_sha256 }}"
+    owner: root
+    group: root
+    mode: "0755"
+  notify: Restart go2rtc
+
+- name: Config (holds camera logins; root-owned, readable by the service only)
+  ansible.builtin.template:
+    src: go2rtc.yaml.j2
+    dest: "{{ go2rtc_conf_dir }}/go2rtc.yaml"
+    owner: root
+    group: "{{ go2rtc_user }}"
+    mode: "0640"
+  no_log: true
+  notify: Restart go2rtc
+
+- name: Install systemd unit
+  ansible.builtin.template:
+    src: go2rtc.service.j2
+    dest: /etc/systemd/system/go2rtc.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart go2rtc
+
+- name: Which services are running
+  ansible.builtin.service_facts:
+
+- name: Who holds the API port
+  ansible.builtin.command:
+    argv: [ss, -ltnH, sport, "=", ":{{ go2rtc_api_listen.split(':')[-1] }}"]
+  register: go2rtc_port
+  changed_when: false
+
+- name: A go2rtc started by hand would block the service
+  ansible.builtin.assert:
+    that: >-
+      go2rtc_port.stdout | trim == ''
+      or (ansible_facts.services['go2rtc.service'] | default({})).state | default('') == 'running'
+    fail_msg: >-
+      Port {{ go2rtc_api_listen }} is already in use and go2rtc.service is not running: stop the go2rtc
+      started by hand (Ctrl-C in its terminal, or `pkill go2rtc`) and run this again.
+    quiet: true
+
+- name: Enable and start
+  ansible.builtin.systemd:
+    name: go2rtc
+    enabled: true
+    state: started
+    daemon_reload: true
+
+# Handlers run at the end of the play; make sure a changed config is live before checking it.
+- name: Apply pending restarts now
+  ansible.builtin.meta: flush_handlers
+
+- name: Check go2rtc answers on its API
+  ansible.builtin.uri:
+    url: "http://{{ go2rtc_api_listen }}/api"
+    return_content: false
+  register: go2rtc_up
+  until: go2rtc_up.status == 200
+  retries: 10
+  delay: 2
+  changed_when: false
+
+- name: Streams it serves
+  ansible.builtin.uri:
+    url: "http://{{ go2rtc_api_listen }}/api/streams"
+    return_content: true
+  register: go2rtc_streams
+  changed_when: false
+
+- name: Every camera has its main and sub stream
+  ansible.builtin.assert:
+    that: >-
+      (go2rtc_cameras | map(attribute='name') | list
+       + go2rtc_cameras | map(attribute='name') | map('regex_replace', '$', '_sub') | list)
+      | difference(go2rtc_streams.json.keys() | list) | length == 0
+    fail_msg: "go2rtc is missing streams: have {{ go2rtc_streams.json.keys() | list }}"
+    quiet: true

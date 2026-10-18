@@ -1,0 +1,13 @@
+---
+go2rtc_version: "1.9.14"
+go2rtc_url: "https://github.com/AlexxIT/go2rtc/releases/download/v{{ go2rtc_version }}/go2rtc_linux_amd64"
+# sha256 of that release asset (checked on download). Update both together.
+go2rtc_sha256: "32d616af226bd731678ffde328b94cfb94e30339bfefc469cfb76323144615a6"
+
+go2rtc_user: go2rtc
+go2rtc_bin_dir: /opt/go2rtc
+go2rtc_conf_dir: /etc/go2rtc
+
+# No login on go2rtc's API: keep it on loopback. The Mac mini reaches it through an ssh tunnel (rv-tv/install-cams-tunnel.sh).
+go2rtc_api_listen: "127.0.0.1:1984"
+go2rtc_rtsp_listen: "127.0.0.1:8554"

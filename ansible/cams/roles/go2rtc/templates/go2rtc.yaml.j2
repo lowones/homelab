@@ -1,0 +1,13 @@
+# Managed by Ansible (ansible/cams, role go2rtc). Do not hand-edit; holds camera logins.
+# The cameras change their RTSP address every few minutes; an onvif:// source asks the camera for the
+# current one each time. NAME is the full-size stream, NAME_sub the 640x360 one used by the grid.
+api:
+  listen: "{{ go2rtc_api_listen }}"
+rtsp:
+  listen: "{{ go2rtc_rtsp_listen }}"
+streams:
+{% for c in go2rtc_cameras %}
+{% set login = ((c.user | default(go2rtc_cam_user)) | urlencode | replace('/', '%2F')) ~ ':' ~ ((c.password | default(go2rtc_cam_password)) | urlencode | replace('/', '%2F')) %}
+  {{ c.name }}: onvif://{{ login }}@{{ c.ip }}
+  {{ c.name }}_sub: onvif://{{ login }}@{{ c.ip }}?subtype=SubProfileToken
+{% endfor %}
