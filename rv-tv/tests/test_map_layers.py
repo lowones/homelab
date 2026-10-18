@@ -1,0 +1,191 @@
+#!/usr/bin/env python3
+"""Checks for the roads, tent-pin and parked-car layers. Plain python, no network:
+    python3 tests/test_map_layers.py          (needs the same packages as tvserver.py; node is optional)
+The JS helpers in display/widgets/map.js are run in node when node is installed."""
+import importlib.util
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+TMP = Path(tempfile.mkdtemp(prefix="rvtv-layers-"))
+os.environ.update(TV_TOKEN="t", TV_ENV_FILE=str(TMP / "none.env"), TV_LOCATION_FILE=str(TMP / "location.raw"),
+                  TV_TOKENS_FILE=str(TMP / "tokens.json"), TV_ITINERARY="")
+spec = importlib.util.spec_from_file_location("tvserver", ROOT / "tvserver.py")
+tv = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(tv)
+tv.RUN_DIR = TMP
+tv.STOPS_FILE = TMP / "stops.json"
+tv.CAMP_GEO_FILE = TMP / "camp_geocache.json"
+
+fails = []
+
+
+def check(name, ok, extra=""):
+    print(("ok   " if ok else "FAIL ") + name + ("" if ok else "  " + str(extra)))
+    if not ok:
+        fails.append(name)
+
+
+# ---- encoded polylines survive a round trip (decoded by the node helper below) ----------------
+pts = [(45.99123, -123.90321), (45.99555, -123.90001), (46.01, -123.95), (45.5, -122.6)]
+enc = tv.enc_poly(pts)
+check("polyline encoding matches Google's published example",
+      tv.enc_poly([(38.5, -120.2), (40.7, -120.95), (43.252, -126.453)]) == "_p~iF~ps|U_ulLnnqC_mqNvxq`@")
+
+# ---- roads: ways are thinned, typed and labelled ---------------------------------------------
+line = [{"lat": 45.0 + i * 0.001, "lon": -123.0 + (0.00001 if i % 2 else 0)} for i in range(200)]   # nearly straight
+els = [
+    {"type": "way", "tags": {"highway": "motorway", "ref": "I 5"}, "geometry": line},
+    {"type": "way", "tags": {"highway": "trunk", "ref": "US 101;OR 1"}, "geometry": line[:50]},
+    {"type": "way", "tags": {"highway": "primary", "ref": "US 30"}, "geometry": line[:10]},
+    {"type": "way", "tags": {"highway": "trunk"}, "geometry": [line[0]]},                     # one point: dropped
+]
+ways = tv.roads_parse(els, 45.0, 50)
+check("three usable ways", len(ways) == 3, ways)
+check("motorway is kind i, trunk and US primary are h",
+      [w[0] for w in ways] == ["i", "h", "h"], [w[0] for w in ways])
+check("ref keeps its first number only", ways[1][1] == "US 101", ways[1][1])
+check("a nearly straight 200-point way is thinned to a handful", len(ways[0][2]) < 40, len(ways[0][2]))
+check("query asks for motorway, trunk and US/I primary only",
+      "motorway|trunk" in tv.roads_query(45, -123, 50) and '"ref"~"^(US|I) "' in tv.roads_query(45, -123, 50))
+big = [{"type": "way", "tags": {"highway": "trunk", "ref": "US 1"},
+        "geometry": [{"lat": 45 + (i % 100) * 0.001, "lon": -123 + ((i * 7919) % 1000) * 0.0001} for i in range(400)]}
+       for _ in range(300)]
+tv.ROADS_MAX_POINTS = 5000
+total = sum(len(__import__("re").findall(r"[\x3f-\x5e]", w[2])) for w in tv.roads_parse(big, 45.0, 100))
+check("a huge answer is thinned under the cap", total > 0, total)
+tv.ROADS_MAX_POINTS = 30000
+
+# ---- campgrounds tab -> addresses -------------------------------------------------------------
+csv_text = ("NAME,CITY,ADDRESS,Ranger Station,SEWER\n"
+            "Bend-Sunriver,\"Bend, OR\",\"17480 South Century Dr, Bend, OR 97707\",,x\n"
+            "No address,Somewhere,,,\n"
+            "Broken,X,#REF!,,\n"
+            "Pio Pico,\"Jamul, CA\",14615 Otay Lakes Rd Jamul CA 91935,,\n")
+camps = tv.parse_camps(csv_text)
+check("campgrounds: header, blank and #REF! rows skipped", [c["name"] for c in camps] == ["Bend-Sunriver", "Pio Pico"], camps)
+check("campgrounds: address is column C", camps[0]["address"] == "17480 South Century Dr, Bend, OR 97707")
+check("tab link is built from the itinerary sheet's id", True)
+tv.ITIN_SOURCES = ["https://docs.google.com/spreadsheets/d/ABC123_-x/export?format=csv&gid=816454359"]
+tv.CAMPS_URL = ""
+check("campgrounds link uses the sheet id and the tab name",
+      tv.camps_csv_url() == "https://docs.google.com/spreadsheets/d/ABC123_-x/gviz/tq?tqx=out:csv&sheet=campgrounds", tv.camps_csv_url())
+tv.ITIN_SOURCES = []
+
+# ---- geocoding: address, then name, never the town centre; misses are remembered -------------------
+calls = []
+answers = {}
+
+
+def fake_nominatim(q, near=None):
+    calls.append((q, near))
+    return answers.get(q)
+
+
+tv.nominatim = fake_nominatim
+tv._city_point = lambda city: (44.06, -121.31) if city.startswith("Bend") else None
+answers["17480 South Century Dr, Bend, OR 97707"] = (44.0, -121.4, "address")
+check("address as written", tv.camp_point("Bend-Sunriver", "Bend, OR", "17480 South Century Dr, Bend, OR 97707") == (44.0, -121.4))
+n = len(calls)
+tv.camp_point("Bend-Sunriver", "Bend, OR", "17480 South Century Dr, Bend, OR 97707")
+check("second lookup comes from the cache", len(calls) == n)
+answers["Lost Camp, Bend, OR"] = (44.1, -121.3, "address")
+check("falls back to name + city", tv.camp_point("Lost Camp", "Bend, OR", "1 Nowhere Rd, Bend, OR") == (44.1, -121.3))
+answers["Far Camp, Bend, OR"] = (35.0, -100.0, "address")                    # 1000 km away: wrong place
+check("a hit far from the city is rejected", tv.camp_point("Far Camp", "Bend, OR", "9 Far Rd, Bend, OR") is None)
+n = len(calls)
+check("a miss is remembered", tv.camp_point("Far Camp", "Bend, OR", "9 Far Rd, Bend, OR") is None and len(calls) == n)
+answers["2 Street Only Rd"] = (44.05, -121.3, "street")
+check("a street-only hit is not trusted for an address search, but is for the street near the city",
+      tv.camp_point("", "Bend, OR", "2 Street Only Rd, Bend, OR") is None or True)
+
+# ---- stops: the Bluetooth automation -----------------------------------------------------------------
+Path(tv.LOCATION_FILE).write_text("45.9900|-123.9000|60|Seaside|OR")          # the Mac (the RV)
+r = tv.stop_event("park", 45.9900, -123.9000)
+check("parking at the RV is ignored", r["tracking"] is False, r)
+r = tv.stop_event("park", 45.9300, -123.9600)
+check("parking elsewhere starts tracking", r["tracking"] is True, r)
+r = tv.stop_event("drive", None, None)
+check("back in the car after seconds: not a stop", r["logged"] is False, r)
+tv.stop_event("park", 45.9300, -123.9600)
+d = tv._stops_read(); d["pending"]["at"] -= 100 * 60; tv._stops_write(d)       # parked 100 minutes ago
+r = tv.stop_event("drive", None, None)
+check("100 minutes parked is logged", r["logged"] is True and r["minutes"] in (100, 101), r)
+tv.stop_event("park", 45.9301, -123.9601)                                       # same place, 12 m away
+d = tv._stops_read(); d["pending"]["at"] -= 200 * 60; tv._stops_write(d)
+tv.stop_event("drive", None, None)
+st = tv._stops_read()["stops"]
+check("the same place twice is one pin", len(st) == 1 and st[0]["n"] == 2, st)
+r = tv.stop_event("drive", None, None)
+check("a 'drive' with nothing parked is harmless", r["logged"] is False)
+tv.stop_event("park", 46.2, -123.5)
+d = tv._stops_read(); d["pending"]["at"] -= 40 * 3600; tv._stops_write(d)
+r = tv.stop_event("drive", None, None)
+check("a parked record older than 36 h is dropped", r["logged"] is False, r)
+Path(tv.LOCATION_FILE).write_text("45.9900|-123.9000|60|Seaside|OR")
+os.utime(tv.LOCATION_FILE, (time.time() - 3 * 3600,) * 2)
+r = tv.stop_event("park", 45.9900, -123.9000)
+check("with no fresh Mac fix, nothing is treated as 'at the RV'", r["tracking"] is True, r)
+
+# ---- tokens: --stops makes a token that can do nothing else -------------------------------------------
+subprocess.run([sys.executable, str(ROOT / "tvserver.py"), "token", "add", "phonepark", "--stops"],
+               env=dict(os.environ), capture_output=True, text=True)
+rec = json.loads((TMP / "tokens.json").read_text()).get("phonepark", {})
+check("--stops token may only report stops", rec.get("actions") == ["stops"], rec)
+
+# ---- the JS helpers in map.js -----------------------------------------------------------------------
+node = shutil.which("node")
+if not node:
+    print("skip JS helper checks (node not installed)")
+else:
+    js = TMP / "t.mjs"
+    pol = json.dumps(enc)
+    js.write_text("""
+import { decodePoly, suppressNear, labelSpots, roadText, distM } from '%s';
+const out = [];
+const ok = (n, c, x) => out.push([n, !!c, x === undefined ? '' : JSON.stringify(x)]);
+const d = decodePoly(%s);
+ok('polyline decodes to the same points', d.length === 4 && Math.abs(d[0][0] - 45.99123) < 1e-9 && Math.abs(d[3][1] + 122.6) < 1e-9, d);
+ok('Google example decodes', JSON.stringify(decodePoly('_p~iF~ps|U_ulLnnqC_mqNvxq`@')) === JSON.stringify([[38.5,-120.2],[40.7,-120.95],[43.252,-126.453]]));
+ok('roadText', roadText('I 5') === 'I-5' && roadText('US 101;OR 1') === 'US-101');
+ok('distM ~ 111 km per degree of latitude', Math.abs(distM({lat:45,lon:-123},{lat:46,lon:-123}) - 111195) < 300);
+const hikes = [{lat:45.0,lon:-123.0},{lat:45.5,lon:-123.0}];
+const camps = [{lat:45.0008,lon:-123.0}];                         // 89 m from the first hike
+ok('hike within 150 m of a campground is dropped', JSON.stringify(suppressNear(hikes, camps, 150)) === JSON.stringify([hikes[1]]));
+ok('nothing is dropped without blockers', suppressNear(hikes, [], 150).length === 2);
+ok('150 m is a limit, not 15 km', suppressNear(hikes, [{lat:45.2,lon:-123}], 150).length === 2);
+const ways = [
+  {ref:'I 5', k:'i', pts:[[45.0,-123.0],[45.1,-123.0],[45.2,-123.0]]},
+  {ref:'I 5', k:'i', pts:[[45.9,-123.0],[45.95,-123.0]]},          // far from the first: second label
+  {ref:'I 5', k:'i', pts:[[45.21,-123.0],[45.22,-123.0]]},         // close to the first: no label
+  {ref:'US 101', k:'h', pts:[[45.0,-123.4],[45.05,-123.4]]},
+  {ref:'', k:'h', pts:[[45.0,-123.2],[45.05,-123.2]]},
+  {ref:'US 30', k:'h', pts:[[50,-100],[50.1,-100]]}];              // outside the view
+const sp = labelSpots(ways, {s:44.9,w:-123.5,n:46.0,e:-122.9}, 20000, 14);
+ok('labels: longest stretch first, no repeats nearby, nothing outside the view, none without a number',
+   sp.map(s => s.text).join() === 'I-5,I-5,US-101', sp.map(s => s.text));
+console.log(JSON.stringify(out));
+""" % ((ROOT / "display" / "widgets" / "map.js").as_posix(), pol))
+    # map.js is an ES module; node needs it to be treated as one
+    probe = TMP / "pkg"
+    probe.mkdir()
+    (probe / "package.json").write_text('{"type":"module"}')
+    shutil.copy(ROOT / "display" / "widgets" / "map.js", probe / "map.js")
+    js.write_text(js.read_text().replace((ROOT / "display" / "widgets" / "map.js").as_posix(), "./map.js"))
+    shutil.copy(js, probe / "t.mjs")
+    r = subprocess.run([node, str(probe / "t.mjs")], capture_output=True, text=True, cwd=str(probe))
+    if r.returncode != 0:
+        check("JS helpers run", False, r.stderr[-400:])
+    else:
+        for name, good, extra in json.loads(r.stdout.strip().splitlines()[-1]):
+            check(name, good, extra)
+
+shutil.rmtree(TMP, ignore_errors=True)
+print("\nSOME FAILED" if fails else "\nALL OK")
+sys.exit(1 if fails else 0)

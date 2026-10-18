@@ -227,7 +227,7 @@ GUEST_ACTIONS = ["status", "power_on", "power_off", "input", "volume", "mute", "
 GUEST_INPUTS = {"HDMI_1"}                      # guests may only switch to the Mac
 GUEST_APPS = {"netflix", "amazon", "youtube.leanback.v4"}
 _tok_cache = {"mtime": None, "data": {}}
-ALL_ACTIONS = GUEST_ACTIONS + ["display", "display_data", "admin"]
+ALL_ACTIONS = GUEST_ACTIONS + ["display", "display_data", "stops", "admin"]
 _display = {"token": None, "proc": None, "browser": None, "page": None,   # the running kiosk, if any
             "batcam": None}                                                # id of the Safari window BatCam opened
 
@@ -971,8 +971,8 @@ def _geocache_put(key, val):
     with _geo_lock:
         data = _geocache_read()
         data[key] = val
-        if len(data) > 300:
-            data = dict(list(data.items())[-300:])
+        if len(data) > 1500:
+            data = dict(list(data.items())[-1500:])
         try:
             RUN_DIR.mkdir(parents=True, exist_ok=True)
             tmp = GEOCACHE_FILE.with_suffix(".tmp")
@@ -1277,6 +1277,363 @@ async def get_poi():
     return {"items": value, "count": POI_COUNT}
 
 
+# ---- map layers: highways, campground pins, parked-car stops ------------------------------
+# Roads: interstates and other motorways, trunk roads and US-numbered primary roads from
+# OpenStreetMap (Overpass), simplified and sent as encoded polylines. TV_ROADS=off turns it off.
+# Tent pins: every address in column K of the trip tabs plus column C of the "campgrounds" tab,
+# geocoded in the background (one Nominatim request a second, cached on disk). TV_CAMPS=off.
+# Stops: the iPhone reports "car parked" / "driving again" (POST /display/stop) when it leaves or
+# rejoins the car's Bluetooth; a stay of TV_STOP_MINUTES or more becomes a white pin.
+ROADS_ON = os.environ.get("TV_ROADS", "on").strip().lower() not in ("off", "0", "no", "false")
+CAMPS_ON = os.environ.get("TV_CAMPS", "on").strip().lower() not in ("off", "0", "no", "false")
+CAMPS_TAB = os.environ.get("TV_CAMPS_TAB", "campgrounds").strip() or "campgrounds"
+CAMPS_URL = os.environ.get("TV_CAMPS_URL", "").strip()          # a CSV link; default: the campgrounds tab by name
+STOP_MIN_MIN = float(os.environ.get("TV_STOP_MINUTES", "90"))     # parked at least this long to count
+STOP_HOME_M = float(os.environ.get("TV_STOP_HOME_M", "300"))      # parking this close to the Mac does not count
+STOPS_FILE = RUN_DIR / "stops.json"
+CAMP_GEO_FILE = RUN_DIR / "camp_geocache.json"
+ROADS_MAX_POINTS = 30000
+_roads_bg = BgCache("roads", ok_ttl=24 * 3600, fail_ttl=300)
+
+
+def roads_query(lat, lon, miles):
+    """Overpass QL for the box the map can show. Wider than the post-office box: the water-edge
+    shift can slide the view by a third of its size."""
+    import math
+    half_mi = miles * 0.9 + 8
+    dlat = half_mi / 69.0
+    dlon = half_mi / (69.0 * max(0.2, math.cos(math.radians(lat))))
+    box = "%.4f,%.4f,%.4f,%.4f" % (lat - dlat, lon - dlon, lat + dlat, lon + dlon)
+    return ('[out:json][timeout:40];('
+            'way["highway"~"^(motorway|trunk)$"](%(b)s);'
+            'way["highway"="primary"]["ref"~"^(US|I) "](%(b)s););out tags geom qt;' % {"b": box})
+
+
+def _dp(pts, tol, k):
+    """Douglas-Peucker, iterative. pts are (lat, lon); k = cos(latitude) so lon degrees match lat degrees."""
+    import math
+    n = len(pts)
+    if n < 3:
+        return list(pts)
+    keep = [False] * n
+    keep[0] = keep[-1] = True
+    stack = [(0, n - 1)]
+    while stack:
+        a, b = stack.pop()
+        ax, ay, bx, by = pts[a][1] * k, pts[a][0], pts[b][1] * k, pts[b][0]
+        dx, dy = bx - ax, by - ay
+        l2 = dx * dx + dy * dy
+        best, idx = -1.0, -1
+        for i in range(a + 1, b):
+            px, py = pts[i][1] * k, pts[i][0]
+            if l2 == 0:
+                d = math.hypot(px - ax, py - ay)
+            else:
+                t = max(0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy) / l2))
+                d = math.hypot(px - (ax + t * dx), py - (ay + t * dy))
+            if d > best:
+                best, idx = d, i
+        if best > tol:
+            keep[idx] = True
+            stack.append((a, idx))
+            stack.append((idx, b))
+    return [p for p, kp in zip(pts, keep) if kp]
+
+
+def enc_poly(pts):
+    """Google's encoded polyline format at 1e-5 degrees (the page decodes it)."""
+    out, plat, plon = [], 0, 0
+    for la, lo in pts:
+        a, b = int(round(la * 1e5)), int(round(lo * 1e5))
+        for v in (a - plat, b - plon):
+            v = ~(v << 1) if v < 0 else (v << 1)
+            while v >= 0x20:
+                out.append(chr((0x20 | (v & 0x1f)) + 63))
+                v >>= 5
+            out.append(chr(v + 63))
+        plat, plon = a, b
+    return "".join(out)
+
+
+def roads_parse(elements, lat, miles):
+    """Overpass ways -> [[kind, ref, encoded_polyline], ...]. kind 'i' = interstate / other motorway,
+    'h' = trunk or US-numbered primary road. Geometry is thinned to about one screen pixel at the
+    widest view this data serves, and thinned further if the total gets large."""
+    import math
+    k = math.cos(math.radians(lat))
+    raw = []
+    for el in elements:
+        geom = el.get("geometry") or []
+        if len(geom) < 2:
+            continue
+        tags = el.get("tags") or {}
+        ref = (tags.get("ref") or "").split(";")[0].strip()
+        kind = "i" if tags.get("highway") == "motorway" or ref.startswith("I ") else "h"
+        raw.append((kind, ref, [(g["lat"], g["lon"]) for g in geom]))
+    tol = max(0.00004, miles * 1609.344 / 900.0 / 111320.0 * 0.8)
+    for _ in range(8):
+        thin = [(kd, rf, _dp(pts, tol, k)) for kd, rf, pts in raw]
+        if sum(len(t[2]) for t in thin) <= ROADS_MAX_POINTS:
+            break
+        tol *= 1.7
+    return [[kd, rf, enc_poly(pts)] for kd, rf, pts in thin if len(pts) >= 2]
+
+
+def roads_job(lat, lon, miles):
+    j = http_json(OVERPASS_URL + "?" + urllib.parse.urlencode({"data": roads_query(lat, lon, miles)}), timeout=70)
+    if not isinstance(j, dict) or "elements" not in j:
+        raise ValueError("overpass: unexpected answer")
+    return roads_parse(j["elements"], lat, miles)
+
+
+async def get_roads():
+    if not (NAV_ON and ROADS_ON):
+        return None
+    loc = await current_location()
+    miles = get_map()["miles"]
+    bucket = 25 if miles <= 25 else 50 if miles <= 50 else 100 if miles <= 100 else 250
+    key = (round(loc["lat"], 1), round(loc["lon"], 1), bucket)
+    value, error, at = _roads_bg.get(key, lambda: roads_job(loc["lat"], loc["lon"], bucket))
+    if value is None:
+        return None
+    return {"v": int(at or 0), "ways": value}
+
+
+# -- tent pins ----------------------------------------------------------------------------
+def camps_csv_url():
+    if CAMPS_URL:
+        return CAMPS_URL
+    for src in ITIN_SOURCES + [SHEET_URL]:
+        m = re.search(r"/spreadsheets/d/([A-Za-z0-9_-]+)", src or "")
+        if m:
+            return ("https://docs.google.com/spreadsheets/d/%s/gviz/tq?tqx=out:csv&sheet=%s"
+                    % (m[1], urllib.parse.quote(CAMPS_TAB)))
+    return None
+
+
+def parse_camps(text):
+    """CSV of the campgrounds tab -> [{'name', 'city', 'address'}]. Column A name, B city, C address."""
+    out = []
+    for r in csv.reader(io.StringIO(text)):
+        if len(r) < 3 or r[0].strip().lower() == "name":
+            continue
+        addr = r[2].strip()
+        if addr and not addr.startswith("#"):
+            out.append({"name": r[0].strip(), "city": r[1].strip(), "address": addr})
+    return out
+
+
+_cg_lock = threading.Lock()
+
+
+def _cg_read():
+    try:
+        return json.loads(CAMP_GEO_FILE.read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def _cg_put(key, val):
+    with _cg_lock:
+        data = _cg_read()
+        data[key] = val
+        if len(data) > 3000:
+            data = dict(list(data.items())[-3000:])
+        try:
+            RUN_DIR.mkdir(parents=True, exist_ok=True)
+            tmp = CAMP_GEO_FILE.with_suffix(".tmp")
+            tmp.write_text(json.dumps(data))
+            os.replace(tmp, CAMP_GEO_FILE)
+        except OSError:
+            pass
+
+
+def camp_point(name, city, address):
+    """Blocking. (lat, lon) for one campground / stop address, or None. Tries the address as written,
+    then the campground by name and city, then the street alone near the city. Never falls back to the
+    middle of a town: a tent pin in the wrong place is worse than none. Misses are remembered for a
+    week so a bad address does not cost three lookups on every refresh."""
+    key = "c:" + address.lower()
+    hit = _cg_read().get(key)
+    if hit:
+        if hit[0] is not None:
+            return hit[0], hit[1]
+        if time.time() - hit[3] < 7 * 86400:
+            return None
+    try:
+        cpt = _city_point(city) if city else None
+    except Exception:
+        cpt = None
+
+    def sane(got):
+        return got and not (cpt and _km({"lat": got[0], "lon": got[1]}, {"lat": cpt[0], "lon": cpt[1]}) > 80)
+
+    got = None
+    try:
+        g = nominatim(address)
+        if sane(g) and g[2] == "address":
+            got = g
+        if not got and name:
+            g = nominatim("%s, %s" % (name, city) if city else name)
+            if sane(g):
+                got = g
+        if not got and cpt:
+            street = address.split(",")[0].strip()
+            g = nominatim(street, near=cpt)
+            if sane(g):
+                got = g
+    except Exception as e:
+        log.warning("campground lookup failed for %s: %s", address, e)
+        return None                                    # network trouble: do not cache a miss
+    if got:
+        _cg_put(key, [got[0], got[1], got[2], time.time()])
+        return got[0], got[1]
+    _cg_put(key, [None, None, "miss", time.time()])
+    return None
+
+
+_camps = {"items": [], "v": 0, "next": 0.0, "busy": False, "error": None}
+
+
+def _camps_wanted():
+    """Blocking. [(name, city, address)] without repeats: the campgrounds tab, then the trip stops."""
+    seen, out = set(), []
+
+    def add(name, city, addr):
+        k = re.sub(r"\s+", " ", addr.strip().lower())
+        if addr.strip() and k not in seen:
+            seen.add(k)
+            out.append((name, city, addr.strip()))
+
+    url = camps_csv_url()
+    if url:
+        try:
+            for c in parse_camps(read_source(url)):
+                add(c["name"], c["city"], c["address"])
+        except Exception as e:
+            _camps["error"] = "campgrounds tab: " + (str(e) or type(e).__name__)
+            log.warning("%s", _camps["error"])
+    try:
+        itinerary_city(datetime.date.today())            # makes sure the trip tabs are loaded
+    except Exception as e:
+        log.warning("trip tabs for pins: %s", e)
+    for v in _itin.get("stops", {}).values():
+        for st in v:
+            add("", st["city"], st["address"])
+    return out
+
+
+def _camps_worker():
+    now = time.time()
+    try:
+        _camps["error"] = None
+        items = []
+        for n, (name, city, addr) in enumerate(_camps_wanted(), 1):
+            pt = camp_point(name, city, addr)
+            if pt and not any(_km({"lat": pt[0], "lon": pt[1]}, {"lat": q["lat"], "lon": q["lon"]}) < 0.08 for q in items):
+                items.append({"lat": round(pt[0], 5), "lon": round(pt[1], 5)})
+            if n % 10 == 0:                              # pins appear while the slow part is still running
+                _camps.update(items=list(items), v=_camps["v"] + 1)
+        _camps.update(items=list(items), v=_camps["v"] + 1, next=now + 6 * 3600)
+    except Exception as e:
+        _camps["error"] = str(e) or type(e).__name__
+        _camps["next"] = now + 300
+        log.warning("campground pins failed: %s", _camps["error"])
+    finally:
+        _camps["busy"] = False
+
+
+async def get_camps():
+    if not (NAV_ON and CAMPS_ON):
+        return None
+    if time.time() >= _camps["next"] and not _camps["busy"]:
+        _camps["busy"] = True
+        threading.Thread(target=_camps_worker, daemon=True, name="bg-camps").start()
+    return {"v": _camps["v"], "items": _camps["items"]}
+
+
+# -- parked-car stops -----------------------------------------------------------------------
+_stops_lock = threading.Lock()
+
+
+def _stops_read():
+    try:
+        d = json.loads(STOPS_FILE.read_text())
+        return {"pending": d.get("pending"), "stops": list(d.get("stops") or [])}
+    except (OSError, ValueError, AttributeError):
+        return {"pending": None, "stops": []}
+
+
+def _stops_write(d):
+    RUN_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = STOPS_FILE.with_suffix(".tmp")
+    fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        json.dump(d, f)
+    os.replace(tmp, STOPS_FILE)
+
+
+def _mac_fix():
+    """The Mac's exact position from the location agent, or None when it is missing or stale."""
+    try:
+        age = time.time() - LOCATION_FILE.stat().st_mtime
+        parts = LOCATION_FILE.read_text().strip().split("|")
+        lat, lon = float(parts[0]), float(parts[1])
+    except (OSError, ValueError, IndexError):
+        return None
+    return {"lat": lat, "lon": lon} if age <= DEVICE_MAX_AGE else None
+
+
+def stop_event(event, lat, lon):
+    """Blocking. 'park': the phone left the car at (lat, lon). 'drive': it is back in the car. A stay of
+    STOP_MIN_MIN or more is saved; parking next to the Mac (the RV) is ignored."""
+    now = time.time()
+    with _stops_lock:
+        d = _stops_read()
+        pend = d["pending"]
+        if pend and now - pend["at"] > 36 * 3600:
+            pend = d["pending"] = None
+        if event == "park":
+            here = _mac_fix()
+            at_home = here and _km(here, {"lat": lat, "lon": lon}) * 1000 < STOP_HOME_M
+            d["pending"] = None if at_home else {"lat": round(lat, 5), "lon": round(lon, 5), "at": now}
+            _stops_write(d)
+            return {"event": "park", "tracking": not at_home, "note": "at the RV, ignored" if at_home else None}
+        if not pend:
+            return {"event": "drive", "logged": False, "note": "no parked car on record"}
+        mins = (now - pend["at"]) / 60.0
+        d["pending"] = None
+        logged = mins >= STOP_MIN_MIN
+        if logged:
+            for s_ in d["stops"]:
+                if _km(s_, pend) < 0.1:                  # the same place again: one pin, newest visit
+                    s_.update(at=pend["at"], mins=round(mins), n=s_.get("n", 1) + 1)
+                    break
+            else:
+                d["stops"].append({"lat": pend["lat"], "lon": pend["lon"], "at": pend["at"],
+                                   "mins": round(mins), "n": 1})
+            d["stops"] = d["stops"][-500:]
+        _stops_write(d)
+        return {"event": "drive", "logged": logged, "minutes": round(mins)}
+
+
+async def get_stops():
+    return {"items": [{"lat": s_["lat"], "lon": s_["lon"], "at": s_["at"], "mins": s_.get("mins")}
+                      for s_ in _stops_read()["stops"][-300:]]}
+
+
+@app.post("/display/stop")
+async def stop_endpoint(event: str = Query(..., pattern="^(park|drive)$"),
+                        lat: float = Query(None, ge=-90, le=90), lon: float = Query(None, ge=-180, le=180),
+                        who: Who = Depends(need("stops"))):
+    """The phone's Bluetooth automation: event=park&lat=..&lon=.. when it leaves the car, event=drive when it
+    is back. Needs a token with the 'stops' action (tvserver.py token add NAME --stops)."""
+    if event == "park" and (lat is None or lon is None):
+        raise HTTPException(400, "park needs lat and lon")
+    return await asyncio.get_running_loop().run_in_executor(None, stop_event, event, lat, lon)
+
+
+
 async def _soft(coro, what):
     """Run an optional part of /display/data; a failure there must not blank the weather or TV."""
     try:
@@ -1353,6 +1710,9 @@ async def display_data(who: Who = Depends(need("display_data"))):
     out["tides"] = await _soft(get_tides(), "tides")
     out["map"] = get_map()
     out["poi"] = await _soft(get_poi(), "poi")
+    out["roads"] = await _soft(get_roads(), "roads")
+    out["camps"] = await _soft(get_camps(), "camps")
+    out["stops"] = await _soft(get_stops(), "stops")
     return out
 
 
@@ -2016,11 +2376,16 @@ def token_cmd(args):
         acts = [a for a in GUEST_ACTIONS if not ("--no-off" in args and a == "power_off")]
         if "--display" in args:
             acts.append("display")      # may open and close the dashboard on the Mac
+        if "--stops" in args:
+            acts = ["stops"]            # the phone's parking automation: nothing else
         if acts != GUEST_ACTIONS:
             rec["actions"] = acts
         data[name] = rec
         save_tokens(data)
-        print(f"Added {name}. Send them this link:\n  {base_url()}/guest#{rec['token']}")
+        if "--stops" in args:
+            print(f"Added {name} (may only report parking). Token for the Shortcut:\n  {rec['token']}")
+        else:
+            print(f"Added {name}. Send them this link:\n  {base_url()}/guest#{rec['token']}")
     elif cmd == "revoke" and len(args) >= 2:
         if data.pop(args[1], None) is None:
             sys.exit("no such guest")
@@ -2035,7 +2400,7 @@ def token_cmd(args):
     elif cmd == "link" and len(args) >= 2 and args[1] in data:
         print(f"{base_url()}/guest#{data[args[1]]['token']}")
     else:
-        sys.exit("usage: tvserver.py token add NAME [--no-off] [--display] | revoke NAME | list | link NAME")
+        sys.exit("usage: tvserver.py token add NAME [--no-off] [--display] [--stops] | revoke NAME | list | link NAME")
 
 
 if __name__ == "__main__":

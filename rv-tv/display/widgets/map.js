@@ -5,9 +5,18 @@
 // tools/make_pins.py); the amber line is the drive to the next stop. Leaflet is vendored under
 // display/vendor/, so only the imagery tiles need internet: with the link down the map keeps
 // its pins, route and position on a dark background and says so.
+// Also drawn: interstates / motorways (thick, white) and trunk or US-numbered primary roads (thin) with
+// route labels (data.roads, OpenStreetMap); yellow tent pins at every campground and trip-stop address
+// (data.camps); white pins where the car sat parked 90 minutes or more (data.stops). Where pins overlap,
+// campground beats hike beats tracked stop: a hike or stop within OVERLAP_M of a higher pin is not drawn.
 const BASE = '/display/static/';
 const S = { map: null, here: null, targetMark: null, line: [], key: '', routeKey: '', miles: 35, rem: 24, fitId: 0,
-            loads: 0, errors: 0, note: null, poiData: null, poiLayer: null, poiKey: '', hereLL: null };
+            loads: 0, errors: 0, note: null, poiData: null, poiLayer: null, poiKey: '', hereLL: null,
+            pins: [], hikeGroup: null, hikeKey: '', campData: null, campLayer: null, campKey: '',
+            stopData: null, stopLayer: null, stopKey: '',
+            roadsData: null, roadV: null, roadWays: [], roadLayer: null, roadRenderer: null,
+            roadLabelLayer: null, labelKey: '' };
+const OVERLAP_M = 150;       // pins closer than this count as the same place
 
 function loadCss(href) {
   const l = document.createElement('link');
@@ -34,6 +43,85 @@ function pinIcon(rem) {
     '<path d="M15 1C7.3 1 1 7.1 1 14.7 1 25.2 15 41 15 41s14-15.8 14-26.3C29 7.1 22.7 1 15 1z" fill="#e11d2e" stroke="#fff" stroke-width="2"/>' +
     '<circle cx="15" cy="14.5" r="5.2" fill="#fff"/></svg>';
   return L.divIcon({ className: 'hike-pin', html: svg, iconSize: [w, h], iconAnchor: [w / 2, h - 1] });
+}
+
+// ---- helpers (pure; exported so the smoke tests can run them in node) -----------------------------------
+export function distM(a, b) {
+  const R = 6371000, r = Math.PI / 180;
+  const dla = (b.lat - a.lat) * r, dlo = (b.lon - a.lon) * r;
+  const h = Math.sin(dla / 2) ** 2 + Math.cos(a.lat * r) * Math.cos(b.lat * r) * Math.sin(dlo / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(h));
+}
+
+// Items ({lat, lon}) that are NOT within `m` metres of any blocker.
+export function suppressNear(items, blockers, m) {
+  if (!blockers || !blockers.length) return items;
+  const dlat = m / 111000;
+  return items.filter(it => !blockers.some(b => Math.abs(b.lat - it.lat) <= dlat && distM(it, b) < m));
+}
+
+// Google's encoded polyline (precision 1e-5), as the server sends the roads.
+export function decodePoly(str) {
+  const out = [];
+  let i = 0, lat = 0, lon = 0;
+  while (i < str.length) {
+    for (let k = 0; k < 2; k++) {
+      let b, shift = 0, res = 0;
+      do { b = str.charCodeAt(i++) - 63; res |= (b & 0x1f) << shift; shift += 5; } while (b >= 0x20 && i < str.length + 1);
+      const d = (res & 1) ? ~(res >> 1) : (res >> 1);
+      if (k === 0) lat += d; else lon += d;
+    }
+    out.push([lat / 1e5, lon / 1e5]);
+  }
+  return out;
+}
+
+export function roadText(ref) {            // "I 5" -> "I-5", "US 101" -> "US-101"
+  return String(ref || '').split(';')[0].trim().replace(/\s+/g, '-');
+}
+
+// Where to put route labels: per road number the longest stretch inside `bounds` ({s, w, n, e}), and a second
+// and third one only when they are at least `gapM` from the ones already placed. At most `max` labels.
+export function labelSpots(ways, bounds, gapM, max) {
+  const inside = p => p[0] >= bounds.s && p[0] <= bounds.n && p[1] >= bounds.w && p[1] <= bounds.e;
+  const cand = [];
+  for (const w of ways) {
+    if (!w.ref) continue;
+    const pts = w.pts.filter(inside);
+    if (pts.length < 2) continue;
+    let len = 0;
+    for (let i = 1; i < pts.length; i++) len += distM({ lat: pts[i - 1][0], lon: pts[i - 1][1] }, { lat: pts[i][0], lon: pts[i][1] });
+    const mid = pts[Math.floor(pts.length / 2)];
+    cand.push({ ref: w.ref, k: w.k, len, lat: mid[0], lon: mid[1] });
+  }
+  cand.sort((a, b) => b.len - a.len);
+  const out = [], perRef = {};
+  for (const c of cand) {
+    if (out.length >= max) break;
+    if ((perRef[c.ref] || 0) >= 3) continue;
+    if (out.some(o => distM(o, c) < (o.ref === c.ref ? gapM : gapM / 3))) continue;
+    perRef[c.ref] = (perRef[c.ref] || 0) + 1;
+    out.push({ text: roadText(c.ref), k: c.k, lat: c.lat, lon: c.lon, ref: c.ref });
+  }
+  return out;
+}
+
+const PIN_PATH = '<path d="M15 1C7.3 1 1 7.1 1 14.7 1 25.2 15 41 15 41s14-15.8 14-26.3C29 7.1 22.7 1 15 1z"';
+function glyphPin(cls, fill, stroke, glyph, rem) {
+  const w = Math.round(rem * 1.6), h = Math.round(rem * 2.24);
+  const svg = '<svg width="' + w + '" height="' + h + '" viewBox="0 0 30 42" xmlns="http://www.w3.org/2000/svg">' +
+    PIN_PATH + ' fill="' + fill + '" stroke="' + stroke + '" stroke-width="2"/>' + glyph + '</svg>';
+  return L.divIcon({ className: cls, html: svg, iconSize: [w, h], iconAnchor: [w / 2, h - 1] });
+}
+// yellow pin, tent: campgrounds and trip-stop addresses
+function tentIcon(rem) {
+  return glyphPin('poi-pin', '#ffd21f', '#fff',
+    '<path d="M15 7.4 6.4 20.8h17.2z" fill="#3a2d00"/><path d="M15 12.6 11.8 20.8h6.4z" fill="#ffd21f"/>' +
+    '<path d="M5.6 21.6h18.8" stroke="#3a2d00" stroke-width="1.7" stroke-linecap="round"/>', rem);
+}
+// white pin: somewhere the car sat parked for a while
+function stopIcon(rem) {
+  return glyphPin('poi-pin', '#ffffff', '#1c1c1c', '<circle cx="15" cy="14.6" r="4.8" fill="#1c1c1c"/>', rem);
 }
 
 // ---- post offices, libraries, Costco -----------------------------------------------------------------
@@ -93,11 +181,81 @@ function say(text) {
 async function addPins() {
   let pins = [];
   try { pins = await (await fetch(BASE + 'pins.json')).json(); } catch (e) { return; }   // no file: no pins
+  S.pins = pins.map(p => ({ lat: p[0], lon: p[1] }));
+  buildHikes();
+}
+
+// Red hike pins, minus the ones that sit on a campground pin (campground wins).
+function buildHikes() {
+  if (!S.map || !S.pins.length) return;
+  const camps = (S.campData && S.campData.items) || [];
+  const keep = suppressNear(S.pins, camps, OVERLAP_M);
+  const key = (S.campData ? S.campData.v : 0) + '|' + keep.length + '|' + S.rem;
+  if (key === S.hikeKey) return;
+  S.hikeKey = key;
+  if (S.hikeGroup) S.map.removeLayer(S.hikeGroup);
   const icon = pinIcon(S.rem);
   const group = L.markerClusterGroup({ maxClusterRadius: 50, showCoverageOnHover: false, spiderfyOnMaxZoom: false,
     zoomToBoundsOnClick: false, disableClusteringAtZoom: 15, chunkedLoading: true, animate: false });
-  group.addLayers(pins.map(p => L.marker([p[0], p[1]], { icon, interactive: false, keyboard: false })));
+  group.addLayers(keep.map(p => L.marker([p.lat, p.lon], { icon, interactive: false, keyboard: false })));
   group.addTo(S.map);
+  S.hikeGroup = group;
+}
+
+function drawCamps() {
+  if (!S.map || !S.campLayer || !S.campData) return;
+  const key = S.campData.v + '|' + S.campData.items.length + '|' + S.rem;
+  if (key === S.campKey) return;
+  S.campKey = key;
+  S.campLayer.clearLayers();
+  const icon = tentIcon(S.rem);
+  S.campData.items.forEach(c => L.marker([c.lat, c.lon], { icon, interactive: false, keyboard: false, pane: 'campPane' }).addTo(S.campLayer));
+  buildHikes();                                                  // hikes under a tent pin step aside
+  S.stopKey = '';                                                // and so do stops
+}
+
+function drawStops() {
+  if (!S.map || !S.stopLayer || !S.stopData) return;
+  const camps = (S.campData && S.campData.items) || [];
+  const shown = suppressNear(suppressNear(S.stopData.items, camps, OVERLAP_M), S.pins, OVERLAP_M);   // campground > hike > stop
+  const key = shown.map(p => p.lat + ',' + p.lon).join('|') + '@' + S.rem;
+  if (key === S.stopKey) return;
+  S.stopKey = key;
+  S.stopLayer.clearLayers();
+  const icon = stopIcon(S.rem);
+  shown.forEach(p => L.marker([p.lat, p.lon], { icon, interactive: false, keyboard: false, pane: 'stopPane' }).addTo(S.stopLayer));
+}
+
+// Highways: lines are rebuilt when the server's copy changes; labels when the view moves.
+function drawRoads() {
+  const map = S.map, d = S.roadsData;
+  if (!map || !S.roadLayer || !d || !d.ways) return;
+  const r = S.rem;
+  if (d.v !== S.roadV) {
+    S.roadV = d.v;
+    S.roadWays = d.ways.map(w => ({ k: w[0], ref: w[1], pts: decodePoly(w[2]) }));
+    S.roadLayer.clearLayers();
+    const I = S.roadWays.filter(w => w.k === 'i').map(w => w.pts), H = S.roadWays.filter(w => w.k !== 'i').map(w => w.pts);
+    const base = { interactive: false, lineCap: 'round', lineJoin: 'round', renderer: S.roadRenderer };
+    [[H, '#0a0e18', .22, .55], [I, '#0a0e18', .30, .55], [H, '#f0f0f0', .10, .85], [I, '#ffffff', .17, .95]].forEach(a => {
+      if (a[0].length) S.roadLayer.addLayer(L.polyline(a[0], { ...base, color: a[1], weight: Math.max(1.5, r * a[2]), opacity: a[3] }));
+    });
+    S.labelKey = '';
+  }
+  const b = map.getBounds();
+  const key = S.roadV + '|' + [b.getSouth(), b.getWest(), b.getNorth(), b.getEast()].map(x => x.toFixed(3)).join() + '|' + r;
+  if (key === S.labelKey) return;
+  S.labelKey = key;
+  S.roadLabelLayer.clearLayers();
+  const gapM = S.miles * 1609.344 * 0.35;
+  labelSpots(S.roadWays, { s: b.getSouth(), w: b.getWest(), n: b.getNorth(), e: b.getEast() }, gapM, 14).forEach(sp => {
+    const bg = sp.k === 'i' ? '#1f4eb4' : '#26272c';
+    const html = '<span style="display:inline-block;transform:translate(-50%,-50%);padding:' + Math.round(r * .06) + 'px ' + Math.round(r * .3) +
+      'px;background:' + bg + ';color:#fff;border:1.5px solid rgba(255,255,255,.85);border-radius:' + Math.round(r * .3) +
+      'px;font:700 ' + Math.round(r * .52) + 'px/1.15 system-ui,sans-serif;white-space:nowrap;box-shadow:0 1px 3px rgba(0,0,0,.6)">' + sp.text + '</span>';
+    L.marker([sp.lat, sp.lon], { interactive: false, keyboard: false, pane: 'roadlabels',
+      icon: L.divIcon({ className: 'road-label', html, iconSize: [0, 0] }) }).addTo(S.roadLabelLayer);
+  });
 }
 
 function tiles() {
@@ -191,6 +349,7 @@ async function fitLand(map, size, z, id) {
   if (!shift || id !== S.fitId) return;                          // nothing to do, or a newer fix arrived
   map.panBy(shift, { animate: false });
   drawPoi();                                                     // the picture moved: re-pick what is inside it
+  drawRoads();                                                   // and re-place the road labels
 }
 
 export default {
@@ -209,16 +368,25 @@ export default {
       markerZoomAnimation: false, dragging: false, scrollWheelZoom: false, doubleClickZoom: false, boxZoom: false,
       keyboard: false, touchZoom: false, inertia: false });
     map.attributionControl.setPrefix(false);
+    [['roads', 380], ['roadlabels', 390], ['stopPane', 590], ['campPane', 650], ['herePane', 700]].forEach(a => {
+      map.createPane(a[0]).style.zIndex = a[1];
+      map.getPane(a[0]).style.pointerEvents = 'none';
+    });
+    S.roadRenderer = L.canvas({ pane: 'roads', padding: 0.1 });
     L.control.scale({ imperial: true, metric: false, position: 'bottomleft' }).addTo(map);
     tiles().forEach(l => l.addTo(map));
     map.setView([39, -98], 4);                       // until the first fix arrives
     S.map = map;
 
     const d = Math.round(S.rem * 2.4);
-    S.here = L.marker([0, 0], { interactive: false, keyboard: false, zIndexOffset: 1000, opacity: 0,
+    S.here = L.marker([0, 0], { interactive: false, keyboard: false, zIndexOffset: 1000, opacity: 0, pane: 'herePane',
       icon: L.divIcon({ className: 'rv-here', html: '<span class="pulse"></span><span class="dot"></span>',
                         iconSize: [d, d], iconAnchor: [d / 2, d / 2] }) }).addTo(map);
     S.poiLayer = L.layerGroup().addTo(map);
+    S.roadLayer = L.layerGroup().addTo(map);
+    S.roadLabelLayer = L.layerGroup().addTo(map);
+    S.stopLayer = L.layerGroup().addTo(map);
+    S.campLayer = L.layerGroup().addTo(map);
     addPins();
     window.addEventListener('resize', () => { map.invalidateSize(); S.key = ''; });
   },
@@ -246,6 +414,12 @@ export default {
     S.hereLL = [h.lat, h.lon];
     S.poiData = data.poi || S.poiData;                // keep the last good set if one poll comes back empty
     drawPoi();
+    S.roadsData = data.roads || S.roadsData;          // same for the layers below
+    S.campData = data.camps || S.campData;
+    S.stopData = data.stops || S.stopData;
+    drawRoads();
+    drawCamps();
+    drawStops();
 
     const r = nav.route, t = nav.target;
     const rk = r ? [r.segments.length, r.segments[0] && r.segments[0].length, r.miles, r.straight, t && t.lat, t && t.lon].join() : '';
@@ -260,7 +434,7 @@ export default {
     S.line.push(L.polyline(r.segments, { ...base, color: '#ffb02e', weight: Math.round(S.rem * .36), opacity: .97 }).addTo(map));
     if (t && t.lat != null) {
       const d = Math.round(S.rem * 2);
-      S.line.push(L.marker([t.lat, t.lon], { interactive: false, keyboard: false, zIndexOffset: 900,
+      S.line.push(L.marker([t.lat, t.lon], { interactive: false, keyboard: false, zIndexOffset: 900, pane: 'herePane',
         icon: L.divIcon({ className: 'rv-target', html: '<span></span>', iconSize: [d, d], iconAnchor: [d / 2, d / 2] }) }).addTo(map));
     }
   },
