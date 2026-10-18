@@ -8,7 +8,7 @@ go2rtc_cameras:
   - { name: barn, ip: 192.168.0.67 }
   - { name: leanto, ip: 192.168.0.64 }
   - { name: rv, ip: 192.168.0.58 }
-  # batcave: not reachable from the LAN yet (see the project doc claude/canny-cam-cameras.md)
+  - { name: batcave, ip: 192.168.0.21 }
 
 # Factory Onvif login of the Canny Cams. Replace with a per-camera password from Vault when they are changed, e.g.
 #   - { name: driveway, ip: 192.168.0.70, password: "{{ lookup('community.hashi_vault.hashi_vault', 'secret=homelab/data/cams/driveway:password') }}" }
