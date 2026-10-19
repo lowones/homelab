@@ -1413,8 +1413,8 @@ def camps_csv_url():
     for src in ITIN_SOURCES + [SHEET_URL]:
         m = re.search(r"/spreadsheets/d/([A-Za-z0-9_-]+)", src or "")
         if m:
-            return ("https://docs.google.com/spreadsheets/d/%s/gviz/tq?tqx=out:csv&sheet=%s"
-                    % (m[1], urllib.parse.quote(CAMPS_TAB)))
+            return ("https://docs.google.com/spreadsheets/d/%s/gviz/tq?tqx=out:csv&headers=0&sheet=%s"
+                    % (m[1], urllib.parse.quote(CAMPS_TAB)))      # headers=0: do not let Google fold the top rows into one header
     return None
 
 
@@ -1425,6 +1425,9 @@ def parse_camps(text):
         if len(r) < 3 or r[0].strip().lower() == "name":
             continue
         addr = r[2].strip()
+        if len(addr) > 160 or len(r[0]) > 160:          # Google folded many rows into one cell: unusable
+            raise ValueError("the campgrounds tab came back merged into one row; "
+                             "set TV_CAMPS_URL to the tab's CSV export link (File > Share > Publish, or .../export?format=csv&gid=<tab id>)")
         if addr and not addr.startswith("#"):
             out.append({"name": r[0].strip(), "city": r[1].strip(), "address": addr})
     return out
@@ -1556,7 +1559,7 @@ async def get_camps():
     if time.time() >= _camps["next"] and not _camps["busy"]:
         _camps["busy"] = True
         threading.Thread(target=_camps_worker, daemon=True, name="bg-camps").start()
-    return {"v": _camps["v"], "items": _camps["items"]}
+    return {"v": _camps["v"], "items": _camps["items"], "error": _camps["error"]}
 
 
 # -- parked-car stops -----------------------------------------------------------------------

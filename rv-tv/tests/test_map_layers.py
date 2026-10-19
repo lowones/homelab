@@ -75,8 +75,19 @@ check("tab link is built from the itinerary sheet's id", True)
 tv.ITIN_SOURCES = ["https://docs.google.com/spreadsheets/d/ABC123_-x/export?format=csv&gid=816454359"]
 tv.CAMPS_URL = ""
 check("campgrounds link uses the sheet id and the tab name",
-      tv.camps_csv_url() == "https://docs.google.com/spreadsheets/d/ABC123_-x/gviz/tq?tqx=out:csv&sheet=campgrounds", tv.camps_csv_url())
+      tv.camps_csv_url() == "https://docs.google.com/spreadsheets/d/ABC123_-x/gviz/tq?tqx=out:csv&headers=0&sheet=campgrounds", tv.camps_csv_url())
 tv.ITIN_SOURCES = []
+merged = ('"NAME Bend-Sunriver Blue Mesa Rec Ranch Fairview RV Park Lake of the Springs Las Vegas RV Resort Long Beach",'
+          '"CITY Bend, OR Gunnison, CO Fairview, OR Oregon House, CA Las Vegas, NV Seaview, WA",'
+          '"ADDRESS 17480 South Century Dr, Bend, OR 97707 27602 US Hwy 50, Gunnison, CO 81230 21401 NE Sandy Blvd, Fairview, OR 97024 '
+          '14152 French Town Road, Oregon House, CA 95962 4295 Boulder Hwy, Las Vegas, NV 89121 2215 Willow Road Seaview, WA 98644","x"\n')
+try:
+    tv.parse_camps(merged)
+    check("a tab that Google folded into one row is reported, not silently used", False)
+except ValueError as e:
+    check("a tab that Google folded into one row is reported, not silently used", "merged" in str(e), e)
+fine = ("NAME,CITY,ADDRESS\nLong Beach,\"Seaview, WA\",2215 Willow Road Seaview WA 98644\nBend-Sunriver,\"Bend, OR\",\"17480 South Century Dr, Bend, OR 97707\"\n")
+check("with real rows, Seaview parses", [c["address"] for c in tv.parse_camps(fine)][0].startswith("2215 Willow"))
 
 # ---- geocoding: address, then name, never the town centre; misses are remembered -------------------
 calls = []
