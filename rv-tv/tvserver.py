@@ -1205,6 +1205,7 @@ async def get_tides():
 # that are actually inside the picture. TV_POI=off turns it off.
 POI_ON = os.environ.get("TV_POI", "on").strip().lower() not in ("off", "0", "no", "false")
 POI_COUNT = max(1, min(20, int(os.environ.get("TV_POI_COUNT", "5") or 5)))     # per kind, on screen
+POI_MILES = max(0.0, float(os.environ.get("TV_POI_MILES", "15") or 15))        # farther than this from the RV: not drawn (0 = no limit)
 OVERPASS_URL = os.environ.get("TV_OVERPASS_URL", "https://overpass-api.de/api/interpreter")
 POI_KINDS = ("post", "library", "costco")
 POI_KEEP = 40                       # per kind, nearest to the Mac, sent to the page
@@ -1280,7 +1281,7 @@ async def get_poi():
     value, error, at = _poi_bg.get(key, lambda: poi_job(loc["lat"], loc["lon"], bucket))
     if value is None:
         return None
-    return {"items": value, "count": POI_COUNT}
+    return {"items": value, "count": POI_COUNT, "max_miles": POI_MILES}
 
 
 # ---- map layers: highways, campground pins, parked-car stops ------------------------------

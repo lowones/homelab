@@ -166,7 +166,7 @@ else:
     js = TMP / "t.mjs"
     pol = json.dumps(enc)
     js.write_text("""
-import { decodePoly, suppressNear, labelSpots, roadText, distM } from '%s';
+import { decodePoly, suppressNear, labelSpots, roadText, distM, pickPoi } from '%s';
 const out = [];
 const ok = (n, c, x) => out.push([n, !!c, x === undefined ? '' : JSON.stringify(x)]);
 const d = decodePoly(%s);
@@ -189,6 +189,13 @@ const ways = [
 const sp = labelSpots(ways, {s:44.9,w:-123.5,n:46.0,e:-122.9}, 20000, 14);
 ok('labels: longest stretch first, no repeats nearby, nothing outside the view, none without a number',
    sp.map(s => s.text).join() === 'I-5,I-5,US-101', sp.map(s => s.text));
+const view = { contains: ll => ll[0] > 44 && ll[0] < 47 && ll[1] > -125 && ll[1] < -122 };
+const pois = [{t:'costco',lat:45.10,lon:-123.5},{t:'costco',lat:45.60,lon:-122.7},{t:'library',lat:45.0,lon:-123.52}];
+const here = [45.0, -123.5];
+ok('without a limit, the far Costco is drawn', pickPoi(pois, view, here, 5).filter(p => p.t === 'costco').length === 2);
+const lim = pickPoi(pois, view, here, 5, 15);
+ok('15-mile limit drops the Costco ~45 mi away and keeps the near ones', lim.filter(p => p.t === 'costco').length === 1 && lim.some(p => p.t === 'library'), lim);
+ok('a limit of 0 means no limit', pickPoi(pois, view, here, 5, 0).length === 3);
 console.log(JSON.stringify(out));
 """ % ((ROOT / "display" / "widgets" / "map.js").as_posix(), pol))
     # map.js is an ES module; node needs it to be treated as one
