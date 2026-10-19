@@ -795,20 +795,28 @@ async def current_location():
 def fetch_weather(loc):
     """Blocking; run in a thread. Returns a compact dict for the weather widget."""
     q = urllib.parse.urlencode({
-        "latitude": loc["lat"], "longitude": loc["lon"], "timezone": "auto", "forecast_days": 3,
+        "latitude": loc["lat"], "longitude": loc["lon"], "timezone": "auto", "forecast_days": 3, "past_days": 1,
         "current": "temperature_2m,apparent_temperature,weather_code,wind_speed_10m",
         "daily": "temperature_2m_max,temperature_2m_min,weather_code,sunrise,sunset",
         "temperature_unit": "fahrenheit", "wind_speed_unit": "mph"})
     with urllib.request.urlopen(f"{WEATHER_URL}?{q}", timeout=8) as r:
         j = json.load(r)
     cur, d = j["current"], j["daily"]
+    rows = [{"date": d["time"][i], "hi": d["temperature_2m_max"][i],
+             "lo": d["temperature_2m_min"][i], "code": d["weather_code"][i],
+             "rise": (d.get("sunrise") or [None] * len(d["time"]))[i],
+             "set": (d.get("sunset") or [None] * len(d["time"]))[i]}
+            for i in range(len(d["time"]))]
+    # past_days=1 puts yesterday first. It is sent on its own so that days[0] stays today
+    # (sunrise/sunset and the widget's "Today" row depend on that).
+    yesterday = None
+    if len(rows) > 1 and rows[0]["date"] < rows[1]["date"] and rows[0]["hi"] is not None and rows[0]["lo"] is not None:
+        yesterday, rows = rows[0], rows[1:]
+    elif len(rows) > 3:
+        rows = rows[-3:]
     return {"temp": cur["temperature_2m"], "feels": cur["apparent_temperature"],
             "code": cur["weather_code"], "wind": cur["wind_speed_10m"],
-            "days": [{"date": d["time"][i], "hi": d["temperature_2m_max"][i],
-                      "lo": d["temperature_2m_min"][i], "code": d["weather_code"][i],
-                      "rise": (d.get("sunrise") or [None] * len(d["time"]))[i],
-                      "set": (d.get("sunset") or [None] * len(d["time"]))[i]}
-                     for i in range(len(d["time"]))]}
+            "yesterday": yesterday, "days": rows}
 
 
 async def get_weather():

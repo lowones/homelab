@@ -169,6 +169,28 @@ try:
 except ImportError as e:
     print("skip endpoint checks (" + str(e) + ")")
 
+
+# ---- weather: yesterday arrives on its own, days[0] stays today ----------------------------------------
+import io as _io, urllib.request as _ur
+def _fake_open(url, timeout=8):
+    assert "past_days=1" in url, url
+    body = {"current": {"temperature_2m": 58, "apparent_temperature": 55, "weather_code": 3, "wind_speed_10m": 4},
+            "daily": {"time": ["2026-10-18", "2026-10-19", "2026-10-20", "2026-10-21"],
+                      "temperature_2m_max": [60, 58, 71, 68], "temperature_2m_min": [48, 47, 46, 46],
+                      "weather_code": [61, 3, 3, 3],
+                      "sunrise": ["2026-10-18T07:36", "2026-10-19T07:38", "2026-10-20T07:39", "2026-10-21T07:41"],
+                      "sunset": ["2026-10-18T18:24", "2026-10-19T18:22", "2026-10-20T18:20", "2026-10-21T18:18"]}}
+    return _io.BytesIO(json.dumps(body).encode())
+_orig_open = _ur.urlopen
+_ur.urlopen = _fake_open
+try:
+    wx = tv.fetch_weather({"lat": 46.0, "lon": -123.9})
+finally:
+    _ur.urlopen = _orig_open
+check("yesterday is its own field", wx["yesterday"] and wx["yesterday"]["date"] == "2026-10-18" and wx["yesterday"]["hi"] == 60, wx.get("yesterday"))
+check("days still start with today and keep three days", [d["date"] for d in wx["days"]] == ["2026-10-19", "2026-10-20", "2026-10-21"], wx["days"])
+check("today's sunrise is today's", wx["days"][0]["rise"].startswith("2026-10-19"))
+
 # ---- the JS helpers in map.js -----------------------------------------------------------------------
 node = shutil.which("node")
 if not node:

@@ -93,6 +93,15 @@ export default {
       if (set) { add(sun, 'span', 'k', '🌇'); sun.appendChild(document.createTextNode(set)); }
     }
     const list = add(el, 'ul', 'wx-days');
+    const y = w.data.yesterday;                      // sent separately; days[0] is still today
+    if (y && y.hi != null && y.lo != null) {
+      const li = add(list, 'li', 'wx-yday');
+      li.style.opacity = '0.62';                     // quieter than today so Today stays the focus
+      add(li, 'span', 'd', 'Yesterday');
+      add(li, 'span', 'i', describe(y.code).icon);
+      add(li, 'span', 'hi', deg(y.hi));
+      add(li, 'span', 'lo', deg(y.lo));
+    }
     w.data.days.forEach((d, i) => {
       const li = add(list, 'li');
       add(li, 'span', 'd', dayName(d.date, i));
