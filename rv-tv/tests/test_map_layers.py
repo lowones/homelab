@@ -162,6 +162,14 @@ try:
     check("the admin token in the URL is refused", r2.status_code == 403, (r2.status_code, r2.text))
     r3 = cl.post("/display/stop?event=drive&stoptoken=nope")
     check("a wrong token in the URL is refused", r3.status_code == 401, r3.status_code)
+    if (tv.DISPLAY_DIR / "index.html").exists():
+        rp = cl.get("/display")
+        check("the dashboard page is revalidated, not cached", rp.headers.get("cache-control") == "no-cache", rp.headers)
+    rs = cl.get("/display/static/widgets/weather.js")
+    check("widget files are revalidated, not cached", rs.status_code == 200 and rs.headers.get("cache-control") == "no-cache",
+          (rs.status_code, rs.headers))
+    kc = tv.browser_cmd("/Applications/Google Chrome.app/x", "http://h/display")
+    check("kiosk Chrome gets its own throwaway cache dir", any(a.startswith("--disk-cache-dir=") for a in kc), kc)
     r4 = cl.post("/display/stop?event=drive", headers={"Authorization": "Bearer " + tok})
     check("the header still works", r4.status_code == 200, r4.status_code)
     r5 = cl.get("/display/data?stoptoken=" + tok)

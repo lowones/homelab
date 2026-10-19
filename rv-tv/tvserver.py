@@ -25,6 +25,7 @@ import logging
 import os
 import re
 import secrets
+import shutil
 import ssl
 import subprocess
 import sys
@@ -460,7 +461,9 @@ def browser_cmd(exe, url):
     prof.mkdir(parents=True, exist_ok=True)
     if firefox:
         return [exe, "--kiosk", "--no-remote", "--profile", str(prof), url]
-    return [exe, "--kiosk", f"--user-data-dir={prof}", "--no-first-run",
+    cache = RUN_DIR / "kiosk-cache"                       # thrown away on every open: never serves stale widgets
+    shutil.rmtree(cache, ignore_errors=True)
+    return [exe, "--kiosk", f"--user-data-dir={prof}", f"--disk-cache-dir={cache}", "--no-first-run",
             "--no-default-browser-check", "--noerrdialogs", "--disable-infobars", url]
 
 
@@ -1673,7 +1676,7 @@ async def whoami(who: Who = Depends(need(None))):
 @app.get("/display", response_class=FileResponse)
 async def display_page():
     # Holds no secrets; the page reads its token from the URL fragment.
-    return FileResponse(DISPLAY_DIR / "index.html")
+    return FileResponse(DISPLAY_DIR / "index.html", headers={"Cache-Control": "no-cache"})
 
 
 # ---- map zoom: how many miles the dashboard map spans (shorter side). A setting, like the weather
@@ -2113,8 +2116,17 @@ async def copy_address(who: Who = Depends(need("display"))):
     return res
 
 
+class FreshStatic(StaticFiles):
+    """Display files are revalidated on every load (cheap: the ETag answers 304), so a changed widget
+    reaches the kiosk at once instead of whenever Chrome decides its cached copy has expired."""
+    async def get_response(self, path, scope):
+        resp = await super().get_response(path, scope)
+        resp.headers["Cache-Control"] = "no-cache"
+        return resp
+
+
 if DISPLAY_DIR.is_dir():
-    app.mount("/display/static", StaticFiles(directory=str(DISPLAY_DIR)), name="display-static")
+    app.mount("/display/static", FreshStatic(directory=str(DISPLAY_DIR)), name="display-static")
 
 
 GUEST_PAGE = """<!doctype html>
