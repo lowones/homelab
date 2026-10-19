@@ -139,6 +139,25 @@ subprocess.run([sys.executable, str(ROOT / "tvserver.py"), "token", "add", "phon
 rec = json.loads((TMP / "tokens.json").read_text()).get("phonepark", {})
 check("--stops token may only report stops", rec.get("actions") == ["stops"], rec)
 
+
+# ---- the token may ride in the URL, but only a --stops token ------------------------------------------------
+try:
+    from fastapi.testclient import TestClient
+    cl = TestClient(tv.app)
+    tok = rec.get("token", "")
+    r1 = cl.post("/display/stop?event=drive&stoptoken=" + tok)
+    check("a --stops token in the URL is accepted", r1.status_code == 200, (r1.status_code, r1.text))
+    r2 = cl.post("/display/stop?event=drive&stoptoken=" + os.environ["TV_TOKEN"])
+    check("the admin token in the URL is refused", r2.status_code == 403, (r2.status_code, r2.text))
+    r3 = cl.post("/display/stop?event=drive&stoptoken=nope")
+    check("a wrong token in the URL is refused", r3.status_code == 401, r3.status_code)
+    r4 = cl.post("/display/stop?event=drive", headers={"Authorization": "Bearer " + tok})
+    check("the header still works", r4.status_code == 200, r4.status_code)
+    r5 = cl.get("/display/data?stoptoken=" + tok)
+    check("the URL token does not work on other endpoints", r5.status_code in (401, 403), r5.status_code)
+except ImportError as e:
+    print("skip endpoint checks (" + str(e) + ")")
+
 # ---- the JS helpers in map.js -----------------------------------------------------------------------
 node = shutil.which("node")
 if not node:

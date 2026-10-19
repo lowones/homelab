@@ -277,10 +277,16 @@ def identify(authorization):
 
 
 def need(action):
-    def dep(authorization: str = Header(default="")):
+    def dep(authorization: str = Header(default=""), stoptoken: str = Query(default="")):
         if not TV_TOKEN:
             raise HTTPException(500, "server has no TV_TOKEN configured")
+        via_url = False
+        if not authorization and stoptoken and action == "stops":
+            authorization, via_url = "Bearer " + stoptoken, True    # the iPhone Shortcut can't always send headers
         who = identify(authorization)
+        if via_url and (who.admin or who.actions != {"stops"}):
+            log.warning("denied: %s sent a token in the URL that can do more than report parking", who.name)
+            raise HTTPException(403, "only a --stops token may be sent in the URL")
         if action and not who.admin and action not in who.actions:
             log.warning("denied: %s tried %s", who.name, action)
             raise HTTPException(403, f"not allowed: {action}")
