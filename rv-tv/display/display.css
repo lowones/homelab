@@ -12,6 +12,7 @@
   --target: #27c4b4;
   --tide: #86cbff;        /* tide times and heights */
   --tide-now: #5fe28f;    /* the tide that is next */
+  --extra: #c9a7ff;       /* the second weather place (Dundee) */
 }
 html { font-size: calc(100vw / 80); }
 body {
@@ -105,6 +106,14 @@ body {
 .wx-days .hi { text-align: right; font-weight: 600; }
 .wx-days .lo { text-align: right; color: var(--ink-dim); }
 .wx-error { font-size: 1.5rem; color: var(--signal); }
+.wx-extra { display: flex; align-items: baseline; gap: .7rem; margin-top: .6rem; font-size: 1.6rem;
+  color: var(--extra); white-space: nowrap; }
+.wx-extra .xl { font-weight: 600; margin-right: auto; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.wx-extra .xi { font-size: 1.8rem; }
+.wx-extra .xt, .wx-extra .xh { font-weight: 600; }
+.wx-extra .xd { font-size: 1.2rem; opacity: .85; }
+.wx-extra .xh, .wx-extra .xlo { width: 3.4rem; text-align: right; }
+.wx-extra .xlo { opacity: .7; }
 .wx-tides { margin-top: .6rem; padding-top: .5rem; border-top: .1rem solid var(--rule); }
 .wx-tides h3 { display: flex; justify-content: space-between; align-items: baseline; gap: 1.2rem;
   margin: 0 0 .35rem; font-size: 1.1rem; font-weight: 500; color: var(--tide); }

@@ -146,10 +146,13 @@ function poiIcon(kind, rem) {
 
 // Nearest `count` of each kind among those inside the current view AND within `maxMiles` of the Mac
 // (so a wide map still only shows what is close; 0 or missing = no distance limit).
-export function pickPoi(items, bounds, here, count, maxMiles) {
+// `byKind` ({post: 10, library: 10}) overrides maxMiles for those kinds.
+export function pickPoi(items, bounds, here, count, maxMiles, byKind) {
   const out = [];
-  const near = p => !(maxMiles > 0) || distM({ lat: here[0], lon: here[1] }, p) <= maxMiles * 1609.344;
+  const origin = { lat: here[0], lon: here[1] };
   for (const kind of Object.keys(POI)) {
+    const lim = byKind && byKind[kind] != null ? Number(byKind[kind]) : maxMiles;
+    const near = p => !(lim > 0) || distM(origin, p) <= lim * 1609.344;
     const inView = items.filter(p => p.t === kind && bounds.contains([p.lat, p.lon]) && near(p))
       .map(p => ({ p, d: Math.hypot(p.lat - here[0], (p.lon - here[1]) * Math.cos(here[0] * Math.PI / 180)) }))
       .sort((a, b) => a.d - b.d);
@@ -162,7 +165,7 @@ function drawPoi() {
   const map = S.map;
   if (!map || !S.poiLayer) return;
   const d = S.poiData, here = S.hereLL;
-  const picked = d && here && d.items ? pickPoi(d.items, map.getBounds(), here, d.count || 5, d.max_miles) : [];
+  const picked = d && here && d.items ? pickPoi(d.items, map.getBounds(), here, d.count || 5, d.max_miles, d.max_miles_by_kind) : [];
   const key = picked.map(p => p.t + p.lat + ',' + p.lon).join('|') + '@' + S.rem;
   if (key === S.poiKey) return;                              // nothing changed: leave the markers alone
   S.poiKey = key;

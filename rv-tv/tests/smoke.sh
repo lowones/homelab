@@ -77,6 +77,7 @@ chk "display static file"             200 $B/display/static/layout.json
 chk "display data needs a token"      401 $B/display/data
 body "display data has weather"       '"temp":54.3'           -H "$A admintok" $B/display/data
 body "display data has tv state"      '"power":"on"'          -H "$A admintok" $B/display/data
+body "display data has the Dundee extra weather" '"weather_extra":{"label":"Dundee, MI"' -H "$A admintok" $B/display/data
 chk "guest cannot read display data"  403 -H "$A $G" $B/display/data
 body "default weather place"          'Lansing, MI'           -H "$A admintok" $B/display/data
 

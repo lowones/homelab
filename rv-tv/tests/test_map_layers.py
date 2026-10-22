@@ -237,6 +237,12 @@ ok('without a limit, the far Costco is drawn', pickPoi(pois, view, here, 5).filt
 const lim = pickPoi(pois, view, here, 5, 15);
 ok('15-mile limit drops the Costco ~45 mi away and keeps the near ones', lim.filter(p => p.t === 'costco').length === 1 && lim.some(p => p.t === 'library'), lim);
 ok('a limit of 0 means no limit', pickPoi(pois, view, here, 5, 0).length === 3);
+const pl = [{t:'post',lat:45.10,lon:-123.5},{t:'post',lat:45.25,lon:-123.5},{t:'library',lat:45.30,lon:-123.5},
+            {t:'library',lat:45.05,lon:-123.5},{t:'costco',lat:45.20,lon:-123.5}];
+const per = pickPoi(pl, view, here, 5, 15, {post: 10, library: 10});
+ok('per-kind 10-mile limit: post/library beyond ~10 mi dropped, Costco at ~14 mi kept under the 15-mile default',
+   per.filter(p => p.t === 'post').length === 1 && per.filter(p => p.t === 'library').length === 1 &&
+   per.filter(p => p.t === 'costco').length === 1, per);
 console.log(JSON.stringify(out));
 """ % ((ROOT / "display" / "widgets" / "map.js").as_posix(), pol))
     # map.js is an ES module; node needs it to be treated as one

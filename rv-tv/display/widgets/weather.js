@@ -49,6 +49,21 @@ function tidePlan(t, now) {
   return { label: upcoming ? 'Tides today' : 'Tides tomorrow', rows, nextIdx: rows.findIndex(e => e.d > now) };
 }
 
+// A second, fixed place (data.weather_extra, e.g. Dundee, MI): one compact line, lilac.
+function drawExtra(el, x) {
+  if (!x || !x.data || x.data.temp == null) return;
+  const d = x.data, c = describe(d.code);
+  const box = add(el, 'div', 'wx-extra');
+  add(box, 'span', 'xl', x.label);
+  add(box, 'span', 'xi', c.icon);
+  add(box, 'span', 'xt', deg(d.temp));
+  add(box, 'span', 'xd', c.text);
+  if (d.hi != null && d.lo != null) {
+    add(box, 'span', 'xh', deg(d.hi));
+    add(box, 'span', 'xlo', deg(d.lo));
+  }
+}
+
 function drawTides(el, t, now) {
   if (!t || !t.station || !t.events || !t.events.length) return;          // inland, or not fetched yet
   const plan = tidePlan(t, now);
@@ -74,6 +89,7 @@ export default {
     if (!w.data) {
       add(el, 'div', 'wx-error', 'Weather unavailable');
       add(el, 'div', 'wx-sub', 'The Mac needs internet to fetch it. Trying again soon.');
+      drawExtra(el, data.weather_extra);
       drawTides(el, data.tides, new Date());
       return;
     }
@@ -109,6 +125,7 @@ export default {
       add(li, 'span', 'hi', deg(d.hi));
       add(li, 'span', 'lo', deg(d.lo));
     });
+    drawExtra(el, data.weather_extra);
     drawTides(el, data.tides, new Date());
     if (w.error && w.updated) add(el, 'div', 'wx-sub', 'Showing data from ' + clock.format(new Date(w.updated * 1000)));
   },

@@ -841,6 +841,47 @@ async def get_weather():
             "updated": _weather["at"], "schedule": loc.get("schedule")}
 
 
+# ---- second, fixed weather place (Dundee, MI 48131 by default) ------------------------------
+# TV_WEATHER_EXTRA="Label|lat|lon" or "off". Same Open-Meteo call as the main weather, cached
+# 10 min; if it fails the widget just leaves the block out.
+def _parse_extra(raw):
+    raw = (raw or "").strip()
+    if raw.lower() in ("off", "0", "no", "false", "none"):
+        return None
+    try:
+        label, lat, lon = [x.strip() for x in raw.split("|")]
+        lat, lon = float(lat), float(lon)
+        if not (-90 <= lat <= 90 and -180 <= lon <= 180):
+            raise ValueError("out of range")
+        return {"label": label or "%.2f, %.2f" % (lat, lon), "lat": lat, "lon": lon}
+    except Exception:
+        log.warning("TV_WEATHER_EXTRA ignored (want 'Label|lat|lon' or 'off'): %r", raw)
+        return None
+
+
+WEATHER_EXTRA = _parse_extra(os.environ.get("TV_WEATHER_EXTRA", "Dundee, MI|41.9570|-83.6561"))
+_weather_extra = {"data": None, "next": 0.0, "at": None}
+
+
+async def get_weather_extra():
+    if not WEATHER_EXTRA:
+        return None
+    now = time.time()
+    if now >= _weather_extra["next"]:
+        try:
+            full = await asyncio.get_running_loop().run_in_executor(None, fetch_weather, WEATHER_EXTRA)
+            today = (full.get("days") or [{}])[0]
+            _weather_extra.update(
+                data={"temp": full["temp"], "code": full["code"], "hi": today.get("hi"), "lo": today.get("lo")},
+                next=now + 600, at=now)
+        except Exception as e:
+            _weather_extra["next"] = now + 60
+            log.warning("extra weather fetch failed: %s", str(e) or type(e).__name__)
+    if not _weather_extra["data"]:
+        return None
+    return {"label": WEATHER_EXTRA["label"], "data": _weather_extra["data"], "updated": _weather_extra["at"]}
+
+
 # ==== NAV: next stop, route, tides (map dashboard) ===================================
 # Everything here fetches in a background thread and serves the last good answer, so a slow
 # or dead Starlink link never holds up /display/data. All of it is optional: TV_NAV=off
@@ -1217,6 +1258,7 @@ async def get_tides():
 POI_ON = os.environ.get("TV_POI", "on").strip().lower() not in ("off", "0", "no", "false")
 POI_COUNT = max(1, min(20, int(os.environ.get("TV_POI_COUNT", "5") or 5)))     # per kind, on screen
 POI_MILES = max(0.0, float(os.environ.get("TV_POI_MILES", "15") or 15))        # farther than this from the RV: not drawn (0 = no limit)
+POI_LOCAL_MILES = max(0.0, float(os.environ.get("TV_POI_LOCAL_MILES", "10") or 10))   # post offices and libraries: tighter limit
 OVERPASS_URL = os.environ.get("TV_OVERPASS_URL", "https://overpass-api.de/api/interpreter")
 POI_KINDS = ("post", "library", "costco")
 POI_KEEP = 40                       # per kind, nearest to the Mac, sent to the page
@@ -1292,7 +1334,9 @@ async def get_poi():
     value, error, at = _poi_bg.get(key, lambda: poi_job(loc["lat"], loc["lon"], bucket))
     if value is None:
         return None
-    return {"items": value, "count": POI_COUNT, "max_miles": POI_MILES}
+    # max_miles is the default limit; max_miles_by_kind overrides it per kind (0 = no limit for that kind)
+    return {"items": value, "count": POI_COUNT, "max_miles": POI_MILES,
+            "max_miles_by_kind": {"post": POI_LOCAL_MILES, "library": POI_LOCAL_MILES}}
 
 
 # ---- map layers: highways, campground pins, parked-car stops ------------------------------
@@ -1727,6 +1771,7 @@ async def set_map(miles: float = Query(None, ge=5, le=500), reset: bool = Query(
 @app.get("/display/data")
 async def display_data(who: Who = Depends(need("display_data"))):
     out = {"now": time.time(), "tv": await status(who), "weather": await get_weather()}
+    out["weather_extra"] = await _soft(get_weather_extra(), "weather_extra")
     out["nav"] = await _soft(get_nav(), "nav")
     out["tides"] = await _soft(get_tides(), "tides")
     out["map"] = get_map()
