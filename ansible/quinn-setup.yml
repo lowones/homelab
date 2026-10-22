@@ -1,0 +1,74 @@
+---
+# Creates the quinn account: key-only SSH login, member of sudo, sudo asks for a password.
+# Needs quinn_password_hash (a $6$ sha512 crypt hash) and quinn_ssh_public_key, both from the
+# ansible-vault file ansible/quinn-vars.yml (see the README note in that file's header).
+- name: Create the quinn account
+  hosts: all
+  become: true
+  gather_facts: false
+
+  pre_tasks:
+    - name: Wait for the new VM to accept SSH
+      ansible.builtin.wait_for_connection:
+        timeout: 300
+        delay: 5
+
+  tasks:
+    - name: Check the secrets were supplied
+      ansible.builtin.assert:
+        that:
+          - quinn_password_hash is defined
+          - quinn_password_hash is match('^\$6\$')
+          - quinn_ssh_public_key is defined
+          - quinn_ssh_public_key is match('^(ssh-ed25519|ssh-rsa|ecdsa-sha2-)')
+        fail_msg: "quinn_password_hash must be a $6$ crypt hash and quinn_ssh_public_key a public key"
+      no_log: true
+
+    - name: Create quinn with sudo
+      ansible.builtin.user:
+        name: quinn
+        shell: /bin/bash
+        groups: sudo
+        append: true
+        create_home: true
+        password: "{{ quinn_password_hash }}"
+        update_password: on_create
+      no_log: true
+
+    - name: Give quinn a .ssh directory
+      ansible.builtin.file:
+        path: /home/quinn/.ssh
+        state: directory
+        owner: quinn
+        group: quinn
+        mode: "0700"
+
+    - name: Install quinn's SSH key
+      ansible.builtin.copy:
+        dest: /home/quinn/.ssh/authorized_keys
+        content: "{{ quinn_ssh_public_key | trim }}\n"
+        owner: quinn
+        group: quinn
+        mode: "0600"
+
+    - name: Key-only SSH, no root login
+      ansible.builtin.copy:
+        dest: /etc/ssh/sshd_config.d/01-hardening.conf
+        content: |
+          PasswordAuthentication no
+          KbdInteractiveAuthentication no
+          PermitRootLogin no
+        owner: root
+        group: root
+        mode: "0644"
+      notify: Restart ssh
+
+    - name: Check the sshd config before restarting
+      ansible.builtin.command: /usr/sbin/sshd -t
+      changed_when: false
+
+  handlers:
+    - name: Restart ssh
+      ansible.builtin.service:
+        name: ssh
+        state: restarted
