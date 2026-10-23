@@ -1,5 +1,5 @@
 locals {
-  ssh_public_key = file("~/.ssh/id_ed25519.pub")
+  ssh_public_key = trimspace(file("~/.ssh/id_ed25519.pub"))
 }
 
 # Small VM for quinn: VMID 252 -> 192.168.0.252. The ubuntu account is the admin login (our key);
