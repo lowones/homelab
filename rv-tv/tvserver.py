@@ -22,6 +22,7 @@ import datetime
 import io
 import json
 import logging
+import math
 import os
 import re
 import secrets
@@ -80,6 +81,11 @@ DEFAULT_LOC = {"lat": 42.7325, "lon": -84.5555, "label": "Lansing, MI"}
 # (a Google Sheets export URL per tab, or a path to a saved .csv). Column 2 is the date
 # (m/d/yyyy), column 4 the city ("Moab, UT"); blank cities mean "still there".
 ITIN_SOURCES = [x.strip() for x in os.environ.get("TV_ITINERARY", "").split(",") if x.strip()]
+# How often the trip tabs are fetched again (seconds, at least 60). Short on purpose: column G
+# holds reminders, and a note typed into the sheet should show up on the TV within minutes.
+ITIN_REFRESH = max(60, int(os.environ.get("TV_ITINERARY_REFRESH", "900")))
+REMINDER_COL = 6             # column G (0-based) of today's row is the reminder
+REMINDER_MAX = 300           # characters kept; the dashboard shows about three lines
 
 # The Mac's own position, refreshed by locationagent.sh (see install-tvserver.sh).
 LOCATION_FILE = Path(os.environ.get("TV_LOCATION_FILE") or Path(__file__).resolve().parent / ".run" / "location.raw")
@@ -660,7 +666,7 @@ def save_state(**changes):
     return cur
 
 
-_itin = {"rows": {}, "next": {}, "stops": {}, "error": None}     # per source: parsed rows, when to refetch
+_itin = {"rows": {}, "next": {}, "stops": {}, "reminders": {}, "error": None}   # per source: parsed rows, when to refetch
 _geo = {}                                            # city -> (lat, lon, label)
 DATE_RE = re.compile(r"^\s*(\d{1,2})/(\d{1,2})/(\d{4})\s*$")
 
@@ -674,6 +680,21 @@ def parse_itinerary(text):
         if m:
             rows.append((datetime.date(int(m[3]), int(m[1]), int(m[2])), r[3].strip() if len(r) > 3 else "", n))
     return sorted(rows, key=lambda x: x[0])
+
+
+def parse_reminders(text):
+    """CSV text -> {date: reminder text} from column G of every dated row. Whitespace (including
+    line breaks inside the cell) is collapsed to single spaces; empty cells are left out."""
+    out = {}
+    for r in csv.reader(io.StringIO(text)):
+        m = DATE_RE.match(r[1]) if len(r) > 1 else None
+        if not m or len(r) <= REMINDER_COL:
+            continue
+        note = " ".join(r[REMINDER_COL].split())
+        if note:
+            d = datetime.date(int(m[3]), int(m[1]), int(m[2]))
+            out[d] = (out[d] + " / " + note) if d in out else note      # two rows, same date: keep both
+    return out
 
 
 def read_source(src):
@@ -697,7 +718,8 @@ def itinerary_city(today):
                 text = read_source(src)
                 _itin["rows"][src] = parse_itinerary(text)
                 _itin["stops"][src] = parse_stops(text)
-                _itin["next"][src] = now + 6 * 3600
+                _itin["reminders"][src] = parse_reminders(text)
+                _itin["next"][src] = now + ITIN_REFRESH
                 _itin["error"] = None
             except Exception as e:
                 _itin["error"] = str(e) or type(e).__name__
@@ -726,6 +748,29 @@ def sheet_target(today):
         if g and row:
             return f"{base}?gid={g[1]}#gid={g[1]}&range=A{row}"
     return SHEET_URL
+
+
+def reminder_today(today):
+    """Blocking. Column G of today's row on the trip tabs, or None. If a refresh fails the
+    last good copy of the sheet keeps being used."""
+    itinerary_city(today)                       # refreshes the cached sources
+    parts = []
+    for src in ITIN_SOURCES:
+        note = _itin["reminders"].get(src, {}).get(today)
+        if note and note not in parts:
+            parts.append(note)
+    if not parts:
+        return None
+    text = " / ".join(parts)
+    if len(text) > REMINDER_MAX:
+        text = text[:REMINDER_MAX - 1].rstrip() + "\u2026"
+    return {"text": text, "date": today.isoformat()}
+
+
+async def get_reminder():
+    if not ITIN_SOURCES:
+        return None
+    return await asyncio.get_running_loop().run_in_executor(None, reminder_today, datetime.date.today())
 
 
 def itinerary_location(today):
@@ -880,6 +925,39 @@ async def get_weather_extra():
     if not _weather_extra["data"]:
         return None
     return {"label": WEATHER_EXTRA["label"], "data": _weather_extra["data"], "updated": _weather_extra["at"]}
+
+
+# ---- moon phase -------------------------------------------------------------------------------
+# Computed here from the date (Meeus, "Astronomical Algorithms" ch. 48, with the main correction
+# terms), so it needs no network and works during a Starlink outage. TV_MOON=off hides it.
+MOON_ON = os.environ.get("TV_MOON", "on").strip().lower() not in ("off", "0", "no", "false")
+MOON_ICONS = {"New Moon": "\U0001F311", "Waxing Crescent": "\U0001F312", "First Quarter": "\U0001F313",
+              "Waxing Gibbous": "\U0001F314", "Full Moon": "\U0001F315", "Waning Gibbous": "\U0001F316",
+              "Last Quarter": "\U0001F317", "Waning Crescent": "\U0001F318"}
+MOON_EXACT_DEG = 12.2        # about one day either side of new, quarter and full keeps the principal name
+
+
+def moon_info(ts=None):
+    """{'name', 'icon', 'percent', 'waxing'} for the moment `ts` (unix seconds; default now).
+    Illumination is good to about 1 percent."""
+    ts = time.time() if ts is None else ts
+    T = (ts / 86400.0 + 2440587.5 - 2451545.0) / 36525.0
+    rad = math.radians
+    D = (297.8501921 + 445267.1114034 * T - 0.0018819 * T ** 2 + T ** 3 / 545868 - T ** 4 / 113065000) % 360
+    M = (357.5291092 + 35999.0502909 * T - 0.0001536 * T ** 2 + T ** 3 / 24490000) % 360
+    Mp = (134.9633964 + 477198.8675055 * T + 0.0087414 * T ** 2 + T ** 3 / 69699 - T ** 4 / 14712000) % 360
+    i = (180 - D - 6.289 * math.sin(rad(Mp)) + 2.100 * math.sin(rad(M)) - 1.274 * math.sin(rad(2 * D - Mp))
+         - 0.658 * math.sin(rad(2 * D)) - 0.214 * math.sin(rad(2 * Mp)) - 0.110 * math.sin(rad(D)))
+    illum = (1 + math.cos(rad(i))) / 2
+    elong = (180 - i) % 360                    # 0 new, 90 first quarter, 180 full, 270 last quarter
+    name = None
+    for centre, label in ((0, "New Moon"), (90, "First Quarter"), (180, "Full Moon"), (270, "Last Quarter")):
+        if abs((elong - centre + 180) % 360 - 180) <= MOON_EXACT_DEG:
+            name = label
+    if not name:
+        name = ("Waxing Crescent" if elong < 90 else "Waxing Gibbous" if elong < 180
+                else "Waning Gibbous" if elong < 270 else "Waning Crescent")
+    return {"name": name, "icon": MOON_ICONS[name], "percent": int(round(illum * 100)), "waxing": elong < 180}
 
 
 # ==== NAV: next stop, route, tides (map dashboard) ===================================
@@ -1772,6 +1850,8 @@ async def set_map(miles: float = Query(None, ge=5, le=500), reset: bool = Query(
 async def display_data(who: Who = Depends(need("display_data"))):
     out = {"now": time.time(), "tv": await status(who), "weather": await get_weather()}
     out["weather_extra"] = await _soft(get_weather_extra(), "weather_extra")
+    out["moon"] = moon_info() if MOON_ON else None
+    out["reminder"] = await _soft(get_reminder(), "reminder")
     out["nav"] = await _soft(get_nav(), "nav")
     out["tides"] = await _soft(get_tides(), "tides")
     out["map"] = get_map()

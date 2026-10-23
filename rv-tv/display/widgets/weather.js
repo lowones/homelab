@@ -1,5 +1,6 @@
 // Weather codes are WMO codes as returned by Open-Meteo. Sunrise and sunset come from the same
 // call; tides come from the nearest NOAA prediction station (data.tides, absent inland).
+// The moon phase (data.moon) is worked out on the server and shown at the right of the top row.
 const CODES = [
   [[0], 'Clear', '☀️'], [[1], 'Mostly clear', '🌤️'], [[2], 'Partly cloudy', '⛅'], [[3], 'Overcast', '☁️'],
   [[45, 48], 'Fog', '🌫️'], [[51, 53, 55, 56, 57], 'Drizzle', '🌦️'], [[61, 63, 65, 66, 67], 'Rain', '🌧️'],
@@ -100,13 +101,20 @@ export default {
     const side = add(top, 'div', 'wx-side');
     add(side, 'div', 'wx-desc', cur.text);
     add(side, 'div', 'wx-sub', 'Feels like ' + deg(w.data.feels) + ' · Wind ' + Math.round(w.data.wind) + ' mph');
+    const moon = data.moon;                          // computed on the server (data.moon): no network needed
+    if (moon && moon.name) {
+      const mo = add(top, 'div', 'wx-moon');
+      add(mo, 'div', 'mi', moon.icon);
+      add(mo, 'div', 'mn', moon.name);
+      add(mo, 'div', 'mp', moon.percent + '% lit');
+    }
     const today = w.data.days[0] || {};
     const rise = sunTime(today.rise), set = sunTime(today.set);
     if (rise || set) {
       const sun = add(side, 'div', 'wx-sun');
-      if (rise) { add(sun, 'span', 'k', '🌅'); sun.appendChild(document.createTextNode(rise)); }
+      if (rise) { const g = add(sun, 'span', 'sg'); add(g, 'span', 'k', '🌅'); g.appendChild(document.createTextNode(rise)); }
       if (rise && set) add(sun, 'span', 'gap');
-      if (set) { add(sun, 'span', 'k', '🌇'); sun.appendChild(document.createTextNode(set)); }
+      if (set) { const g = add(sun, 'span', 'sg'); add(g, 'span', 'k', '🌇'); g.appendChild(document.createTextNode(set)); }
     }
     const list = add(el, 'ul', 'wx-days');
     const y = w.data.yesterday;                      // sent separately; days[0] is still today
