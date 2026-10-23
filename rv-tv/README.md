@@ -38,7 +38,14 @@ browser window on the Mac pointed at `/display`. `POST /display/close` closes it
   `TV_ITINERARY=https://docs.google.com/spreadsheets/d/<ID>/export?format=csv&gid=<GID>,...`
   (a path to a saved `.csv` also works). Today's city is the last one named on or before today
   (column 4; blank rows mean "still there"; ignored 14 days after the last dated row). Refetched every
-  6 h. Setting a place by hand pins it; `./tv place auto` or "Follow schedule" goes back to the sheet.
+  15 min (`TV_ITINERARY_REFRESH=<seconds>`, minimum 60). Setting a place by hand pins it;
+  `./tv place auto` or "Follow schedule" goes back to the sheet.
+- **Reminder** (same trip tabs, nothing to configure): if column G of today's row has text, the
+  dashboard shows it in a red "Reminder" card at the top right, cut off after three lines. Only
+  today's row counts, so a reminder is written on the day it should appear. When the sheet cannot be
+  fetched the last good copy keeps being used. Adding the next year's tab to `TV_ITINERARY` covers it.
+- **Moon phase** at the right of the weather row (name, icon, percent lit). Worked out on the server
+  from the date, so it needs no internet. `TV_MOON=off` hides it.
 - **Open sheet** button: `TV_SHEET_URL=<sheet link>` in `tv.env` shows that page fullscreen on the Mac
   instead of the dashboard (same permission as the dashboard; `./tv sheet`). The kiosk browser has its
   own profile: sign in to Google there once (screen-share to the mini) if the sheet is not public.

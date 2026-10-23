@@ -78,6 +78,8 @@ chk "display data needs a token"      401 $B/display/data
 body "display data has weather"       '"temp":54.3'           -H "$A admintok" $B/display/data
 body "display data has tv state"      '"power":"on"'          -H "$A admintok" $B/display/data
 body "display data has the Dundee extra weather" '"weather_extra":{"label":"Dundee, MI"' -H "$A admintok" $B/display/data
+body "display data has the moon phase" '"moon":{"name":"' -H "$A admintok" $B/display/data
+body "no itinerary -> no reminder" '"reminder":null' -H "$A admintok" $B/display/data
 chk "guest cannot read display data"  403 -H "$A $G" $B/display/data
 body "default weather place"          'Lansing, MI'           -H "$A admintok" $B/display/data
 
@@ -116,7 +118,8 @@ t = datetime.date.today(); f = lambda d: f"{d.month}/{d.day}/{d.year}"
 D = datetime.timedelta
 open(sys.argv[1] + "/trip.csv", "w").write(
     "W,DATE,DAY,CITY,CAMPGROUND\n"
-    f"1,{f(t - D(3))},x,\"Moab, UT\",Site A\n1,{f(t - D(2))},x,,\n1,{f(t)},x,,\n"
+    f"1,{f(t - D(3))},x,\"Moab, UT\",Site A\n1,{f(t - D(2))},x,,\n1,{f(t)},x,,,,Book Bandon for June 12\n"
+    f"1,{f(t + D(1))},x,,,,Not today\n"
     f"1,{f(t + D(5))},x,\"Page, AZ\",Site B\n")
 EOF2
 T2=$T/second; mkdir -p $T2
@@ -126,6 +129,8 @@ for i in $(seq 1 30); do curl -fs http://127.0.0.1:8797/health >/dev/null 2>&1 &
 B2=http://127.0.0.1:8797
 body "weather uses today's scheduled city" '"location":"Moab, UT"' -H "$A admintok" $B2/display/data
 body "state says itinerary source"     '"source":"itinerary"'   -H "$A admintok" $B2/display/state
+body "today's reminder comes from column G" '"reminder":{"text":"Book Bandon for June 12"' -H "$A admintok" $B2/display/data
+out=$(curl -s -H "$A admintok" $B2/display/data); case "$out" in *"Not today"*) echo "FAIL tomorrow's reminder showed today"; fail=1;; *) echo "ok   only today's row supplies the reminder";; esac
 body "pin a place by hand"             '"label":"Moab, Utah"'   -X POST -H "$A admintok" "$B2/display/location?place=Moab,%20Utah"
 body "pinned place wins"               '"source":"manual"'      -H "$A admintok" $B2/display/state
 body "follow schedule again"           '"source":"itinerary"'   -X POST -H "$A admintok" "$B2/display/location?auto=true"

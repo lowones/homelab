@@ -1,6 +1,7 @@
 // Where the Mac is (primary), and where it is headed (under it). On a move day, meaning the
 // trip sheet says today's stop is somewhere else than the Mac's own location fix, the Mac's
-// location stays on top and the sheet's stop is shown as the target.
+// location stays on top and the sheet's stop is shown as the target. A reminder from the
+// sheet, if today has one, sits in the top right corner.
 const SOURCES = { device: "From this Mac's location", itinerary: 'From the trip schedule', manual: 'Pinned by hand' };
 
 function add(parent, tag, cls, text) {
@@ -24,9 +25,18 @@ export default {
     const nav = data.nav, w = data.weather || {};
     const here = nav && nav.here ? nav.here : { label: w.location || '', source: w.source };
     el.replaceChildren();
-    if (nav && nav.move_day) add(el, 'div', 'loc-badge', 'MOVE DAY');
-    add(el, 'div', 'loc-label', here.label || 'Location unknown');
-    if (SOURCES[here.source]) add(el, 'div', 'loc-src', SOURCES[here.source]);
+    const rem = data.reminder && data.reminder.text ? data.reminder : null;
+    const head = add(el, 'div', 'loc-head' + (rem ? ' has-reminder' : ''));
+    const main = add(head, 'div', 'loc-main');
+    if (nav && nav.move_day) add(main, 'div', 'loc-badge', 'MOVE DAY');
+    add(main, 'div', 'loc-label', here.label || 'Location unknown');
+    if (SOURCES[here.source]) add(main, 'div', 'loc-src', SOURCES[here.source]);
+    // Column G of today's row on the trip sheet (data.reminder): top right, opposite the place.
+    if (rem) {
+      const card = add(head, 'div', 'loc-reminder');
+      add(card, 'span', 'tag', 'Reminder');
+      add(card, 'div', 'txt', rem.text);             // textContent only: it comes from a spreadsheet
+    }
 
     const t = nav && nav.target;
     if (!t) return;
