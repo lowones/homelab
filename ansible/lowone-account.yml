@@ -1,0 +1,56 @@
+---
+# Creates the lowone admin account: key-only SSH (batcomputer's key, same as the ubuntu account),
+# member of sudo, passwordless sudo. Separate from quinn-setup.yml so it never touches quinn's key.
+- name: Create the lowone admin account
+  hosts: all
+  become: true
+  gather_facts: false
+
+  vars:
+    lowone_ssh_public_key: "{{ lookup('ansible.builtin.file', lowone_pubkey_file | default('~/.ssh/id_ed25519.pub')) | trim }}"
+
+  pre_tasks:
+    - name: Wait for the VM to accept SSH
+      ansible.builtin.wait_for_connection:
+        timeout: 300
+        delay: 5
+
+  tasks:
+    - name: Check the public key looks right
+      ansible.builtin.assert:
+        that:
+          - lowone_ssh_public_key is match('^(ssh-ed25519|ssh-rsa|ecdsa-sha2-)')
+        fail_msg: "lowone_ssh_public_key must be a public key"
+
+    - name: Create lowone with sudo
+      ansible.builtin.user:
+        name: lowone
+        shell: /bin/bash
+        groups: sudo
+        append: true
+        create_home: true
+
+    - name: Give lowone a .ssh directory
+      ansible.builtin.file:
+        path: /home/lowone/.ssh
+        state: directory
+        owner: lowone
+        group: lowone
+        mode: "0700"
+
+    - name: Install lowone's SSH key
+      ansible.builtin.copy:
+        dest: /home/lowone/.ssh/authorized_keys
+        content: "{{ lowone_ssh_public_key }}\n"
+        owner: lowone
+        group: lowone
+        mode: "0600"
+
+    - name: Passwordless sudo for lowone
+      ansible.builtin.copy:
+        dest: /etc/sudoers.d/90-lowone
+        content: "lowone ALL=(ALL) NOPASSWD:ALL\n"
+        owner: root
+        group: root
+        mode: "0440"
+        validate: /usr/sbin/visudo -cf %s
