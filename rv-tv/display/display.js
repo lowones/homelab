@@ -55,6 +55,25 @@ async function start() {
 
 function safe(fn) { try { fn(); } catch (e) { console.error(e); } }
 
+// Safety net for the right column: everything is sized in rem, so if the content (a tall weather
+// block, a reminder, a long place name) ever runs past the bottom of the screen, shrink the root
+// font a little until the clock and TV lines fit again. Runs after every render, before paint, so
+// nothing flickers; it never goes below 80% and does nothing in the stacked phone layout.
+function fitToScreen() {
+  const root = document.documentElement;
+  root.style.fontSize = '';
+  if (window.matchMedia('(max-width: 900px)').matches) return;
+  const limit = () => innerHeight - parseFloat(getComputedStyle(grid).paddingBottom);
+  const bottom = () => Math.max(0, ...[...grid.querySelectorAll('.widget:not(.widget-map)')]
+    .map(w => w.getBoundingClientRect().bottom));
+  let scale = 1;
+  while (bottom() > limit() && scale > 0.8) {
+    scale = Math.round((scale - 0.02) * 100) / 100;
+    root.style.fontSize = 'calc(100vw / 80 * ' + scale + ')';
+  }
+}
+window.addEventListener('resize', () => safe(fitToScreen));
+
 async function poll() {
   let data = null;
   try {
@@ -65,6 +84,7 @@ async function poll() {
     say('');
   } catch (e) { say('Lost contact with the TV box. Retrying...'); }
   if (data) widgets.forEach(w => w.mod.render && safe(() => w.mod.render(w.el, data)));
+  safe(fitToScreen);
 }
 
 start();

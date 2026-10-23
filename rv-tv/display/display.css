@@ -30,10 +30,10 @@ body {
   grid-template-columns: repeat(12, 1fr);
   grid-template-rows: auto auto 1fr auto auto;   /* where | weather | (spare) | clock | tv */
   column-gap: 2.4rem;
-  row-gap: .8rem;
+  row-gap: .3rem;                                /* small: the spare row between weather and clock adds two gaps even when it is empty */
   box-sizing: border-box;
   height: 100vh;
-  padding: 1.6rem 2.4rem 1.4rem 1.8rem;
+  padding: 1.2rem 2.4rem 1rem 1.8rem;
 }
 .widget { min-width: 0; align-self: start; }
 .widget.broken { color: var(--signal); font-size: 1.4rem; }
@@ -87,13 +87,13 @@ body {
   padding: .45rem .9rem .35rem; border: .14rem solid #ff5a52; border-radius: .6rem; background: rgba(255, 90, 82, .14); }
 .loc-reminder .tag { position: absolute; top: -.8rem; right: .8rem; padding: .05rem .7rem; border-radius: .3rem;
   background: #e5322d; color: #fff; font-size: .95rem; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; }
-.loc-reminder .txt { font-size: 1.15rem; line-height: 1.2; overflow: hidden; overflow-wrap: anywhere;
+.loc-reminder .txt { font-size: 1.15rem; line-height: 1.2; overflow: hidden; overflow-wrap: anywhere; white-space: pre-line;   /* pre-line: the INFO text sits on its own line */
   display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; }
 .loc-badge { display: inline-block; font-size: 1.15rem; font-weight: 700; letter-spacing: .12em;
-  padding: .15rem .7rem; margin-bottom: .45rem; border-radius: .35rem; background: var(--signal); color: #1a1205; }
+  padding: .15rem .7rem; margin-bottom: .3rem; border-radius: .35rem; background: var(--signal); color: #1a1205; }
 .loc-label { font-size: 3rem; line-height: 1.05; font-weight: 600; letter-spacing: -.01em; overflow-wrap: anywhere; }
 .loc-src { font-size: 1.15rem; color: var(--ink-dim); margin-top: .25rem; }
-.loc-target { display: flex; align-items: baseline; gap: .9rem; margin-top: .6rem; font-size: 1.9rem; }
+.loc-target { display: flex; align-items: baseline; gap: .9rem; margin-top: .4rem; font-size: 1.9rem; }
 .loc-target .k { font-size: 1.15rem; letter-spacing: .1em; text-transform: uppercase; color: var(--target); }
 .loc-target .v { font-weight: 600; overflow-wrap: anywhere; }
 .loc-meta { font-size: 1.45rem; color: var(--ink-dim); margin-top: .15rem; }
@@ -114,14 +114,14 @@ body {
 .wx-sun .sg { white-space: nowrap; }
 .wx-sun .k { color: var(--ink-dim); margin-right: .35rem; }
 .wx-sun .gap { display: inline-block; width: .9rem; }
-.wx-days { list-style: none; margin: .7rem 0 0; padding: 0; font-size: 1.6rem; }
+.wx-days { list-style: none; margin: .45rem 0 0; padding: 0; font-size: 1.6rem; }
 .wx-days li { display: grid; grid-template-columns: 1fr auto 3.4rem 3.4rem; align-items: center;
-  column-gap: .9rem; padding: .12rem 0; }
+  column-gap: .9rem; padding: .05rem 0; }
 .wx-days .i { font-size: 1.8rem; }
 .wx-days .hi { text-align: right; font-weight: 600; }
 .wx-days .lo { text-align: right; color: var(--ink-dim); }
 .wx-error { font-size: 1.5rem; color: var(--signal); }
-.wx-extra { display: flex; align-items: baseline; gap: .7rem; margin-top: .6rem; font-size: 1.6rem;
+.wx-extra { display: flex; align-items: baseline; gap: .7rem; margin-top: .35rem; font-size: 1.6rem;
   color: var(--extra); white-space: nowrap; }
 .wx-extra .xl { font-weight: 600; margin-right: auto; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 .wx-extra .xi { font-size: 1.8rem; }
@@ -129,12 +129,12 @@ body {
 .wx-extra .xd { font-size: 1.2rem; opacity: .85; }
 .wx-extra .xh, .wx-extra .xlo { width: 3.4rem; text-align: right; }
 .wx-extra .xlo { opacity: .7; }
-.wx-tides { margin-top: .6rem; padding-top: .5rem; border-top: .1rem solid var(--rule); }
+.wx-tides { margin-top: .35rem; padding-top: .35rem; border-top: .1rem solid var(--rule); }
 .wx-tides h3 { display: flex; justify-content: space-between; align-items: baseline; gap: 1.2rem;
-  margin: 0 0 .35rem; font-size: 1.1rem; font-weight: 500; color: var(--tide); }
+  margin: 0 0 .2rem; font-size: 1.1rem; font-weight: 500; color: var(--tide); }
 .wx-tides h3 .l { letter-spacing: .09em; text-transform: uppercase; white-space: nowrap; }
 .wx-tides h3 .r { font-size: 1.2rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
-.tide-list { display: grid; grid-template-columns: 1fr 1fr; gap: .2rem 1.4rem; font-size: 1.5rem; }
+.tide-list { display: grid; grid-template-columns: 1fr 1fr; gap: .1rem 1.4rem; font-size: 1.5rem; }
 .tide { display: flex; align-items: baseline; gap: .55rem; white-space: nowrap; color: var(--tide); }
 .tide .ar { width: 1rem; color: var(--tide); }
 .tide .when { font-weight: 600; }

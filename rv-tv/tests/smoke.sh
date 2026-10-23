@@ -118,7 +118,7 @@ t = datetime.date.today(); f = lambda d: f"{d.month}/{d.day}/{d.year}"
 D = datetime.timedelta
 open(sys.argv[1] + "/trip.csv", "w").write(
     "W,DATE,DAY,CITY,CAMPGROUND\n"
-    f"1,{f(t - D(3))},x,\"Moab, UT\",Site A\n1,{f(t - D(2))},x,,\n1,{f(t)},x,,,,Book Bandon for June 12\n"
+    f"1,{f(t - D(3))},x,\"Moab, UT\",Site A\n1,{f(t - D(2))},x,,\n1,{f(t)},x,,,,Book Bandon for June 12,,,,,Dentist at 9\n"
     f"1,{f(t + D(1))},x,,,,Not today\n"
     f"1,{f(t + D(5))},x,\"Page, AZ\",Site B\n")
 EOF2
@@ -129,7 +129,7 @@ for i in $(seq 1 30); do curl -fs http://127.0.0.1:8797/health >/dev/null 2>&1 &
 B2=http://127.0.0.1:8797
 body "weather uses today's scheduled city" '"location":"Moab, UT"' -H "$A admintok" $B2/display/data
 body "state says itinerary source"     '"source":"itinerary"'   -H "$A admintok" $B2/display/state
-body "today's reminder comes from column G" '"reminder":{"text":"Book Bandon for June 12"' -H "$A admintok" $B2/display/data
+body "today's reminder comes from column G, then INFO from column L" '"reminder":{"text":"Book Bandon for June 12\nDentist at 9"' -H "$A admintok" $B2/display/data
 out=$(curl -s -H "$A admintok" $B2/display/data); case "$out" in *"Not today"*) echo "FAIL tomorrow's reminder showed today"; fail=1;; *) echo "ok   only today's row supplies the reminder";; esac
 body "pin a place by hand"             '"label":"Moab, Utah"'   -X POST -H "$A admintok" "$B2/display/location?place=Moab,%20Utah"
 body "pinned place wins"               '"source":"manual"'      -H "$A admintok" $B2/display/state

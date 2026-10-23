@@ -85,6 +85,7 @@ ITIN_SOURCES = [x.strip() for x in os.environ.get("TV_ITINERARY", "").split(",")
 # holds reminders, and a note typed into the sheet should show up on the TV within minutes.
 ITIN_REFRESH = max(60, int(os.environ.get("TV_ITINERARY_REFRESH", "900")))
 REMINDER_COL = 6             # column G (0-based) of today's row is the reminder
+INFO_COL = 11                # column L (INFO): any text there also puts today's row on the reminder card
 REMINDER_MAX = 300           # characters kept; the dashboard shows about three lines
 
 # The Mac's own position, refreshed by locationagent.sh (see install-tvserver.sh).
@@ -666,9 +667,12 @@ def save_state(**changes):
     return cur
 
 
-_itin = {"rows": {}, "next": {}, "stops": {}, "reminders": {}, "error": None}   # per source: parsed rows, when to refetch
+_itin = {"rows": {}, "next": {}, "stops": {}, "reminders": {}, "infos": {}, "error": None}   # per source: parsed rows, when to refetch
 _geo = {}                                            # city -> (lat, lon, label)
 DATE_RE = re.compile(r"^\s*(\d{1,2})/(\d{1,2})/(\d{4})\s*$")
+# a reminder cell that is nothing but a date: m/d/yyyy, m/d/yy or yyyy-mm-dd
+NOTE_DATE_RES = (re.compile(r"^(\d{1,2})/(\d{1,2})/(\d{4})$"), re.compile(r"^(\d{1,2})/(\d{1,2})/(\d{2})$"),
+                 re.compile(r"^(\d{4})-(\d{1,2})-(\d{1,2})$"))
 
 
 def parse_itinerary(text):
@@ -682,19 +686,48 @@ def parse_itinerary(text):
     return sorted(rows, key=lambda x: x[0])
 
 
-def parse_reminders(text):
-    """CSV text -> {date: reminder text} from column G of every dated row. Whitespace (including
-    line breaks inside the cell) is collapsed to single spaces; empty cells are left out."""
+def _column_notes(text, col):
+    """CSV text -> {date: text} from one column of every dated row. Whitespace (including line
+    breaks inside the cell) is collapsed to single spaces; empty cells are left out."""
     out = {}
     for r in csv.reader(io.StringIO(text)):
         m = DATE_RE.match(r[1]) if len(r) > 1 else None
-        if not m or len(r) <= REMINDER_COL:
+        if not m or len(r) <= col:
             continue
-        note = " ".join(r[REMINDER_COL].split())
+        note = " ".join(r[col].split())
         if note:
             d = datetime.date(int(m[3]), int(m[1]), int(m[2]))
             out[d] = (out[d] + " / " + note) if d in out else note      # two rows, same date: keep both
     return out
+
+
+def parse_reminders(text):
+    """CSV text -> {date: reminder text} from column G (REMINDER) of every dated row."""
+    return _column_notes(text, REMINDER_COL)
+
+
+def parse_infos(text):
+    """CSV text -> {date: info text} from column L (INFO) of every dated row."""
+    return _column_notes(text, INFO_COL)
+
+
+def note_is_past_date(note, today):
+    """True only when the whole cell is a date (m/d/yyyy, m/d/yy or yyyy-mm-dd) before `today`.
+    The sheet's reminders point at the day a reservation was made; once that day is behind us the
+    reminder is done. Anything else in the cell (text, a date plus text, a bare m/d with no year,
+    an impossible date) is not treated as a date, so it still shows."""
+    note = note.strip()
+    for i, rx in enumerate(NOTE_DATE_RES):
+        m = rx.match(note)
+        if not m:
+            continue
+        a, b, c = (int(x) for x in m.groups())
+        y, mo, d = (a, b, c) if i == 2 else (c + 2000 if i == 1 else c, a, b)
+        try:
+            return datetime.date(y, mo, d) < today
+        except ValueError:
+            return False
+    return False
 
 
 def read_source(src):
@@ -719,6 +752,7 @@ def itinerary_city(today):
                 _itin["rows"][src] = parse_itinerary(text)
                 _itin["stops"][src] = parse_stops(text)
                 _itin["reminders"][src] = parse_reminders(text)
+                _itin["infos"][src] = parse_infos(text)
                 _itin["next"][src] = now + ITIN_REFRESH
                 _itin["error"] = None
             except Exception as e:
@@ -751,17 +785,24 @@ def sheet_target(today):
 
 
 def reminder_today(today):
-    """Blocking. Column G of today's row on the trip tabs, or None. If a refresh fails the
-    last good copy of the sheet keeps being used."""
+    """Blocking. What today's row puts on the reminder card, or None. Two things can fire it:
+    column G (REMINDER), unless the cell is just a date that is already past, and column L (INFO),
+    whenever it has any text. G comes first, INFO on a second line. The same text on two tabs shows
+    once; different text on two tabs is joined with " / ". If a refresh fails the last good copy of
+    the sheet keeps being used."""
     itinerary_city(today)                       # refreshes the cached sources
-    parts = []
+    g_parts, i_parts = [], []
     for src in ITIN_SOURCES:
         note = _itin["reminders"].get(src, {}).get(today)
-        if note and note not in parts:
-            parts.append(note)
-    if not parts:
+        if note and not note_is_past_date(note, today) and note not in g_parts:
+            g_parts.append(note)
+        info = _itin["infos"].get(src, {}).get(today)
+        if info and info not in i_parts:
+            i_parts.append(info)
+    lines = [" / ".join(p) for p in (g_parts, i_parts) if p]
+    if not lines:
         return None
-    text = " / ".join(parts)
+    text = "\n".join(lines)
     if len(text) > REMINDER_MAX:
         text = text[:REMINDER_MAX - 1].rstrip() + "\u2026"
     return {"text": text, "date": today.isoformat()}

@@ -40,10 +40,14 @@ browser window on the Mac pointed at `/display`. `POST /display/close` closes it
   (column 4; blank rows mean "still there"; ignored 14 days after the last dated row). Refetched every
   15 min (`TV_ITINERARY_REFRESH=<seconds>`, minimum 60). Setting a place by hand pins it;
   `./tv place auto` or "Follow schedule" goes back to the sheet.
-- **Reminder** (same trip tabs, nothing to configure): if column G of today's row has text, the
-  dashboard shows it in a red "Reminder" card at the top right, cut off after three lines. Only
-  today's row counts, so a reminder is written on the day it should appear. When the sheet cannot be
-  fetched the last good copy keeps being used. Adding the next year's tab to `TV_ITINERARY` covers it.
+- **Reminder** (same trip tabs, nothing to configure): today's row can put a red "Reminder" card at the
+  top right, cut off after three lines. Two columns fire it. **Column G (REMINDER):** shown unless the
+  cell is only a date that is already past (`m/d/yyyy`, `m/d/yy` or `yyyy-mm-dd`; the year must be in
+  the cell, so format the column to show it). Anything else in the cell shows: text, a date plus text,
+  a bare `6/25`. **Column L (INFO):** any text there shows too, even when G is a past date. When both
+  fire, G is the first line and INFO the second. Only today's row counts, so a reminder is written on
+  the day it should appear. When the sheet cannot be fetched the last good copy keeps being used.
+  Adding the next year's tab to `TV_ITINERARY` covers it.
 - **Moon phase** at the right of the weather row (name, icon, percent lit). Worked out on the server
   from the date, so it needs no internet. `TV_MOON=off` hides it.
 - **Open sheet** button: `TV_SHEET_URL=<sheet link>` in `tv.env` shows that page fullscreen on the Mac

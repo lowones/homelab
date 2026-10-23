@@ -84,6 +84,80 @@ tv.read_source = lambda src: (_ for _ in ()).throw(OSError("offline"))
 check("failed refresh still serves the last good reminder", tv.reminder_today(today)["text"] == "kept")
 check("and the error is recorded", tv._itin["error"] == "offline", tv._itin["error"])
 
+# ---- reminder rules: column G hides when it is only a past date; column L (INFO) also fires -----
+D = datetime.date
+past = tv.note_is_past_date
+check("full past date is past", past("6/25/2026", today) and past("10/21/2026", today))
+check("today's date is not past", not past("10/22/2026", today))
+check("future date is not past", not past("10/23/2026", today) and not past("2/24/2027", today))
+check("2-digit year and ISO dates work", past("6/25/26", today) and past("2026-06-25", today)
+      and not past("2/24/27", today) and not past("2026-11-01", today))
+check("surrounding spaces do not matter", past("  6/25/2026 ", today))
+check("a bare m/d (no year) is not decided: shows", not past("6/25", today))
+check("a date plus text shows", not past("6/25/2026 call KOA", today) and not past("call KOA 6/25/2026", today))
+check("plain text shows", not past("Book Bandon", today) and not past("", today))
+check("an impossible date shows", not past("13/45/2026", today) and not past("2/30/2026", today))
+
+check("INFO column is L", tv.INFO_COL == 11 and tv.REMINDER_COL == 6)
+infotext = (
+    "W,DATE,DAY,CITY,CAMP,DIST,REMINDER,CONF,$,TT,ADDR,INFO\n"
+    "1,10/22/2026,Thu,,,,,,,,,Dentist at 9\n"                      # INFO in column L (index 11)
+    "1,10/23/2026,Fri,,,,6/25/2026,,,,,\n"
+    "1,10/24/2026,Sat,,,,,,,,,\"Turkey Trot,\nCloverdale\"\n"       # multi-line INFO cell
+    "1,10/25/2026,Sun,,,,Text\n")                                    # short row: no L at all
+i = tv.parse_infos(infotext)
+check("parse_infos reads column L of dated rows only", set(i) == {D(2026, 10, 22), D(2026, 10, 24)}, i)
+check("INFO line breaks collapse", i[D(2026, 10, 24)] == "Turkey Trot, Cloverdale", i.get(D(2026, 10, 24)))
+check("parse_reminders still reads column G only", tv.parse_reminders(infotext)[D(2026, 10, 23)] == "6/25/2026")
+
+def put(g=None, l=None, src="fake-a", d=today):
+    tv._itin["reminders"][src] = {d: g} if g is not None else {}
+    tv._itin["infos"][src] = {d: l} if l is not None else {}
+
+tv.ITIN_SOURCES = ["fake-a", "fake-b"]
+tv._itin["next"] = {"fake-a": 9e12, "fake-b": 9e12}
+tv._itin["rows"] = {"fake-a": [], "fake-b": []}
+tv._itin["reminders"] = {}
+tv._itin["infos"] = {}
+put(g="6/25/2026")
+check("past date alone: no card", tv.reminder_today(today) is None)
+put(g="6/25/2026", l="")
+check("past date and empty INFO: no card", tv.reminder_today(today) is None)
+put(g="10/22/2026")
+check("today's date alone still shows", tv.reminder_today(today)["text"] == "10/22/2026")
+put(g="2/24/2027")
+check("future date alone shows", tv.reminder_today(today)["text"] == "2/24/2027")
+put(g="Book Bandon")
+check("plain text alone shows", tv.reminder_today(today)["text"] == "Book Bandon")
+put(l="Dentist at 9")
+check("INFO alone shows", tv.reminder_today(today)["text"] == "Dentist at 9")
+put(g="6/25/2026", l="Dentist at 9")
+check("INFO shows even when G is a past date (and only INFO)", tv.reminder_today(today)["text"] == "Dentist at 9")
+put(g="Book Bandon", l="Dentist at 9")
+check("both: G first, INFO on its own line", tv.reminder_today(today)["text"] == "Book Bandon\nDentist at 9")
+put(g="2/24/2027", l="Dentist at 9")
+check("future date and INFO both show", tv.reminder_today(today)["text"] == "2/24/2027\nDentist at 9")
+check("whitespace-only INFO is blank (dropped when the sheet is read)",
+      tv.parse_infos("W,DATE,DAY,CITY,CAMP,D,G,H,I,J,K,L\n1,10/22/2026,Thu,,,,,,,,,   \n") == {})
+put(g="Book Bandon", l="Dentist at 9", src="fake-a")
+put(g="Book Bandon", l="Dentist at 9", src="fake-b")
+check("the same G and INFO on two tabs show once", tv.reminder_today(today)["text"] == "Book Bandon\nDentist at 9")
+put(g="Book Bandon", l="Dentist at 9", src="fake-a")
+put(g="Call Newport", l="Vet at 3", src="fake-b")
+check("different text on two tabs: joined per line", tv.reminder_today(today)["text"] ==
+      "Book Bandon / Call Newport\nDentist at 9 / Vet at 3")
+put(g="6/25/2026", l="Dentist at 9", src="fake-a")
+put(g="Call Newport", l=None, src="fake-b")
+check("a hidden past date on one tab does not hide the other tab", tv.reminder_today(today)["text"] ==
+      "Call Newport\nDentist at 9")
+put(g="Book", l="x" * 1000, src="fake-a")
+put(g=None, l=None, src="fake-b")
+t = tv.reminder_today(today)["text"]
+check("combined text is cut to the limit and keeps the first line", len(t) == tv.REMINDER_MAX and t.endswith("…")
+      and t.startswith("Book\nxxx"), len(t))
+put(g="6/25/2026", l="Dentist", src="fake-a", d=today + datetime.timedelta(days=1))
+check("only today's row counts for G and INFO", tv.reminder_today(today) is None)
+
 shutil.rmtree(TMP, ignore_errors=True)
 print("\nSOME FAILED" if fails else "\nALL OK")
 sys.exit(1 if fails else 0)
