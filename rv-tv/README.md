@@ -55,7 +55,10 @@ browser window on the Mac pointed at `/display`. `POST /display/close` closes it
 - **Map pins for post offices, libraries and Costco:** blue envelope, purple book, green cart. The server asks OpenStreetMap
   (Overpass) once for everything near the Mac (cached 24 h, last good answer kept when the link drops); the map shows only the
   nearest `TV_POI_COUNT` (default 5) of each kind that are inside the picture, no labels. `TV_POI=off` hides them,
-  `TV_OVERPASS_URL` swaps the service. Needs internet; with none, the pins just don't appear.
+  `TV_OVERPASS_URL` takes one URL or a comma-separated list (default: overpass.openstreetmap.fr, then
+  overpass-api.de); a server that fails or times out is skipped for the next one. Highways use the same
+  list. `/display/data` has a `layer_errors` object saying why a layer is empty or stale. Needs internet;
+  with none, the pins just don't appear.
 
 ## Canny cameras (live video on the TV)
 Phone menu: **BatCam > Canny (live)** has one button per camera (Driveway, Coop, Barn, Lean-To, RV,

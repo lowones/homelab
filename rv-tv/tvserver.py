@@ -1337,10 +1337,44 @@ POI_ON = os.environ.get("TV_POI", "on").strip().lower() not in ("off", "0", "no"
 POI_COUNT = max(1, min(20, int(os.environ.get("TV_POI_COUNT", "5") or 5)))     # per kind, on screen
 POI_MILES = max(0.0, float(os.environ.get("TV_POI_MILES", "15") or 15))        # farther than this from the RV: not drawn (0 = no limit)
 POI_LOCAL_MILES = max(0.0, float(os.environ.get("TV_POI_LOCAL_MILES", "10") or 10))   # post offices and libraries: tighter limit
-OVERPASS_URL = os.environ.get("TV_OVERPASS_URL", "https://overpass-api.de/api/interpreter")
+# TV_OVERPASS_URL is one URL or a comma-separated list, tried in order: the free public servers
+# go down now and then (502, or no answer), so a second one takes over. The server that answered
+# last is tried first next time, so a dead one does not cost a timeout on every refresh.
+OVERPASS_URLS = [u.strip() for u in os.environ.get(
+    "TV_OVERPASS_URL", "https://overpass.openstreetmap.fr/api/interpreter,https://overpass-api.de/api/interpreter"
+).split(",") if u.strip()]
+OVERPASS_URL = OVERPASS_URLS[0]                      # kept for older callers
+_overpass_last_ok = {"i": 0}
+_layer_errors = {}                                   # layer -> last refresh error, shown in /display/data
 POI_KINDS = ("post", "library", "costco")
 POI_KEEP = 40                       # per kind, nearest to the Mac, sent to the page
 _poi_bg = BgCache("poi", ok_ttl=24 * 3600, fail_ttl=300)
+
+
+def overpass_json(query, timeout):
+    """Ask each Overpass server in turn (`timeout` seconds each) and return the first good answer.
+    A good answer is a JSON object with 'elements'; a 200 that only carries a 'remark' about a
+    runtime error or timeout counts as a failure. Raises RuntimeError naming every server that failed."""
+    urls = OVERPASS_URLS
+    n = len(urls)
+    start = _overpass_last_ok["i"] % n
+    errs = []
+    for k in range(n):
+        i = (start + k) % n
+        host = urllib.parse.urlparse(urls[i]).netloc or urls[i]
+        try:
+            j = http_json(urls[i] + "?" + urllib.parse.urlencode({"data": query}), timeout=timeout)
+            if not isinstance(j, dict) or "elements" not in j:
+                raise ValueError("unexpected answer")
+            if not j["elements"] and j.get("remark"):
+                raise ValueError(str(j["remark"])[:120])
+        except Exception as e:
+            errs.append("%s: %s" % (host, (str(e) or type(e).__name__)[:120]))
+            log.warning("overpass %s failed: %s", host, errs[-1])
+            continue
+        _overpass_last_ok["i"] = i
+        return j
+    raise RuntimeError("overpass: all %d server%s failed (%s)" % (n, "" if n == 1 else "s", "; ".join(errs)))
 
 
 def poi_query(lat, lon, miles):
@@ -1396,9 +1430,7 @@ def poi_parse(elements, lat, lon):
 
 
 def poi_job(lat, lon, miles):
-    j = http_json(OVERPASS_URL + "?" + urllib.parse.urlencode({"data": poi_query(lat, lon, miles)}), timeout=40)
-    if not isinstance(j, dict) or "elements" not in j:
-        raise ValueError("overpass: unexpected answer")
+    j = overpass_json(poi_query(lat, lon, miles), timeout=25)
     return poi_parse(j["elements"], lat, lon)
 
 
@@ -1410,6 +1442,7 @@ async def get_poi():
     bucket = 25 if miles <= 25 else 50 if miles <= 50 else 100 if miles <= 100 else 250
     key = (round(loc["lat"], 1), round(loc["lon"], 1), bucket)
     value, error, at = _poi_bg.get(key, lambda: poi_job(loc["lat"], loc["lon"], bucket))
+    _layer_errors["poi"] = error
     if value is None:
         return None
     # max_miles is the default limit; max_miles_by_kind overrides it per kind (0 = no limit for that kind)
@@ -1520,9 +1553,7 @@ def roads_parse(elements, lat, miles):
 
 
 def roads_job(lat, lon, miles):
-    j = http_json(OVERPASS_URL + "?" + urllib.parse.urlencode({"data": roads_query(lat, lon, miles)}), timeout=70)
-    if not isinstance(j, dict) or "elements" not in j:
-        raise ValueError("overpass: unexpected answer")
+    j = overpass_json(roads_query(lat, lon, miles), timeout=45)
     return roads_parse(j["elements"], lat, miles)
 
 
@@ -1534,6 +1565,7 @@ async def get_roads():
     bucket = 25 if miles <= 25 else 50 if miles <= 50 else 100 if miles <= 100 else 250
     key = (round(loc["lat"], 1), round(loc["lon"], 1), bucket)
     value, error, at = _roads_bg.get(key, lambda: roads_job(loc["lat"], loc["lon"], bucket))
+    _layer_errors["roads"] = error
     if value is None:
         return None
     return {"v": int(at or 0), "ways": value}
@@ -1859,6 +1891,10 @@ async def display_data(who: Who = Depends(need("display_data"))):
     out["roads"] = await _soft(get_roads(), "roads")
     out["camps"] = await _soft(get_camps(), "camps")
     out["stops"] = await _soft(get_stops(), "stops")
+    # why a layer is empty or stale, so a failure shows here and not only in the log
+    errs = dict(_layer_errors)
+    errs["camps"] = (out["camps"] or {}).get("error")
+    out["layer_errors"] = {k: v for k, v in errs.items() if v}
     return out
 
 
