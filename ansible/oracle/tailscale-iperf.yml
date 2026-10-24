@@ -1,0 +1,89 @@
+---
+# oracle on the tailnet, and the iperf3 server the RV network test (rv-tv/nettest.py) measures against.
+#
+#   ansible-playbook tailscale-iperf.yml --check --diff -K
+#   ansible-playbook tailscale-iperf.yml -K
+#
+# Written after the fact: both were first set up by hand on 2026-10-17 (iperf3) and 2026-10-23 (Tailscale),
+# so a first run should change nothing. Check with --check --diff before applying.
+#
+# Joining the tailnet needs a login, which is not stored here. If oracle is not logged in the playbook stops
+# with the command to run by hand (sudo tailscale up ...). Settings that can be applied safely are applied
+# with `tailscale set`, which is repeatable.
+- name: Tailscale and iperf3 on oracle
+  hosts: oracle_hosts
+  become: true
+  vars:
+    tailscale_hostname: oracle
+    tailscale_keyring: /usr/share/keyrings/tailscale-archive-keyring.gpg
+    tailscale_repo_base: "https://pkgs.tailscale.com/stable/debian/{{ ansible_facts['distribution_release'] }}"
+    iperf_port: 5201
+  tasks:
+    - name: Debian is what this file is written for
+      ansible.builtin.assert:
+        that: ansible_facts['distribution'] == 'Debian'
+        fail_msg: "tailscale-iperf.yml expects Debian (oracle runs Debian 13)"
+
+    - name: Tailscale package signing key
+      ansible.builtin.get_url:
+        url: "{{ tailscale_repo_base }}.noarmor.gpg"
+        dest: "{{ tailscale_keyring }}"
+        mode: "0644"
+
+    - name: Tailscale apt repository
+      ansible.builtin.get_url:
+        url: "{{ tailscale_repo_base }}.tailscale-keyring.list"
+        dest: /etc/apt/sources.list.d/tailscale.list
+        mode: "0644"
+      register: tailscale_repo
+
+    - name: Install tailscale and iperf3
+      ansible.builtin.apt:
+        name:
+          - tailscale
+          - iperf3
+        state: present
+        update_cache: "{{ tailscale_repo is changed }}"
+
+    - name: Tailscaled runs now and at boot
+      ansible.builtin.systemd:
+        name: tailscaled
+        state: started
+        enabled: true
+
+    - name: Iperf3 server runs now and at boot (TCP and UDP {{ iperf_port }})
+      ansible.builtin.systemd:
+        name: iperf3
+        state: started
+        enabled: true
+
+    - name: Ask tailscale where it stands
+      ansible.builtin.command: tailscale status --json
+      register: ts_status
+      changed_when: false
+      failed_when: false
+
+    - name: Stop with instructions if oracle is not on the tailnet yet
+      ansible.builtin.assert:
+        that:
+          - ts_status.rc == 0
+          - (ts_status.stdout | from_json).BackendState == 'Running'
+        fail_msg: >-
+          oracle is not logged in to Tailscale. On oracle run:
+          sudo tailscale up --accept-dns=false --hostname={{ tailscale_hostname }}
+          (it prints a login link), then run this playbook again.
+
+    - name: Name and DNS settings (repeatable; DNS is left alone because oracle runs its own resolver)
+      ansible.builtin.command: "tailscale set --hostname={{ tailscale_hostname }} --accept-dns=false"
+      changed_when: >-
+        (ts_status.stdout | from_json).Self.HostName != tailscale_hostname
+        or (ts_status.stdout | from_json).CurrentTailnet is not defined
+
+    - name: Show oracle's tailnet address
+      ansible.builtin.command: tailscale ip -4
+      register: ts_ip
+      changed_when: false
+
+    - name: Where to point the network test
+      ansible.builtin.debug:
+        msg: "oracle is {{ ts_ip.stdout }} on the tailnet. On the mini, tv.env: TV_NETTEST_IPERF=oracle={{ ts_ip.stdout }}"
