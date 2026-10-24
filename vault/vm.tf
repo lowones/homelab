@@ -1,3 +1,11 @@
+# Vault (VM 251) already existed when this was put under Terraform (2026-10-24): it was imported, not
+# created. Import (state only, changes nothing on grid):
+#   terraform import proxmox_virtual_environment_vm.vault grid/251
+#   terraform import proxmox_virtual_environment_file.vault_userdata grid/DATA:snippets/vault-user-data.yaml
+# The running VM's cloud-init (ubuntu user, password, root@grid ssh key) and its snippet were made outside
+# this file, and the provider cannot read `clone` or the snippet text back, so those are ignored
+# below. Do not remove the lifecycle blocks without reading `terraform plan`: without them Terraform
+# wants to replace this VM, which is the production Vault.
 resource "proxmox_virtual_environment_file" "vault_userdata" {
   content_type = "snippets"
   datastore_id = "DATA"
@@ -29,6 +37,10 @@ resource "proxmox_virtual_environment_file" "vault_userdata" {
             ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPBIo3wtbTU2WCXdK3f8w8+SUxIfwClwrfxQ1QTk5JX+ lowone@lowone-Standard-PC-i440FX-PIIX-1996
     USERDATA
     file_name = "vault-user-data.yaml"
+  }
+
+  lifecycle {
+    ignore_changes = [source_raw]
   }
 }
 
@@ -76,7 +88,12 @@ resource "proxmox_virtual_environment_vm" "vault" {
   }
 
   purge_on_destroy    = true
-  reboot_after_update = true
+  reboot_after_update = false # a change must never reboot the Vault VM by itself
+
+  lifecycle {
+    prevent_destroy = true
+    ignore_changes  = [clone, initialization]
+  }
 }
 
 output "vault_ip" {
