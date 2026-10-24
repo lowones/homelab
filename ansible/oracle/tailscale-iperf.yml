@@ -95,6 +95,7 @@
       ansible.builtin.command: tailscale ip -4
       register: ts_ip
       changed_when: false
+      check_mode: false
 
     - name: Where to point the network test
       ansible.builtin.debug:
