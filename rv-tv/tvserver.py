@@ -27,6 +27,7 @@ import os
 import re
 import secrets
 import shutil
+import signal
 import ssl
 import subprocess
 import sys
@@ -2072,6 +2073,133 @@ async def batcam_do_endpoint(action: str = Query(..., pattern="^(top|bottom|past
     return {"action": action, "result": res}
 
 
+# ---- Tools > Network test: runs nettest.py in the background and serves its results to the phone menu ----
+_nettest = {"proc": None, "seconds": 0, "started": 0.0}
+NETTEST_RUN_RE = r"^(latest|\d{8}-\d{6})$"
+
+
+def nettest_mod():
+    """nettest.py next to this file (standard library only), imported on first use."""
+    if str(BASE) not in sys.path:
+        sys.path.insert(0, str(BASE))
+    import nettest
+    return nettest
+
+
+def nettest_running():
+    """{'pid','started','duration_s','id'} while a test runs (ours, or one started from the shell), else None."""
+    nt = nettest_mod()
+    info = nt.running_info() or {}
+    p = _nettest["proc"]
+    if p is not None and p.poll() is None:
+        return {"pid": p.pid, "started": info.get("started") or _nettest["started"],
+                "duration_s": info.get("duration_s") or _nettest["seconds"], "id": info.get("id")}
+    if info:
+        return {"pid": int(info["pid"]), "started": info.get("started") or time.time(),
+                "duration_s": info.get("duration_s") or 0, "id": info.get("id")}
+    return None
+
+
+def nettest_last():
+    """The newest finished run, boiled down for the phone page, or None."""
+    nt = nettest_mod()
+    d = nt.latest_dir()
+    if not d:
+        return None
+    try:
+        r = json.loads((d / "result.json").read_text())
+        o = r.get("overall", {})
+    except (OSError, ValueError):
+        return None
+    keys = ("rtt_avg", "rtt_p95", "jitter_ms", "loss_pct", "longest_lost", "usable", "of")
+    return {"id": r.get("id"), "started": r.get("started"), "place": r.get("place"), "partial": bool(r.get("partial")),
+            "duration_s": r.get("duration_s"), "sent": r.get("sent"), "verdict": o.get("verdict"), "rank": o.get("rank"),
+            "mos": o.get("mos"), "summary": o.get("summary"), "numbers": {k: o.get(k) for k in keys},
+            "udp": any(t.get("udp") for t in r.get("targets", [])), "notes": list(r.get("notes", []))[:3]}
+
+
+def nettest_error():
+    """Why the last test we started did not run, or None (exit 0 and 3 both leave a saved result)."""
+    p = _nettest["proc"]
+    if p is None or p.poll() in (None, 0, 3):
+        return None
+    try:
+        tail = (nettest_mod().RUN_DIR / "last.log").read_text(errors="replace").strip().splitlines()
+        return (tail[-1] if tail else "") or "the test stopped (exit %s)" % p.returncode
+    except OSError:
+        return "the test stopped (exit %s)" % p.returncode
+
+
+@app.post("/tools/nettest/start")
+async def nettest_start(seconds: int = Query(600, ge=10, le=1800), who: Who = Depends(need("display"))):
+    """Starts a network test in the background (one at a time). It reads tv.env like ./tv nettest does."""
+    nt = nettest_mod()
+    async with get_lock("nettest"):
+        if nettest_running():
+            raise HTTPException(409, "A test is already running.")
+        env = dict(os.environ)
+        env["PATH"] = ":".join(["/opt/homebrew/bin", "/usr/local/bin", env.get("PATH", "")])   # launchd's PATH has no brew
+        nt.RUN_DIR.mkdir(parents=True, exist_ok=True)
+        with open(str(nt.RUN_DIR / "last.log"), "wb") as logf:
+            try:
+                proc = subprocess.Popen([sys.executable, str(BASE / "nettest.py"), "run", "--duration", str(seconds)],
+                                        stdin=subprocess.DEVNULL, stdout=logf, stderr=subprocess.STDOUT, env=env,
+                                        cwd=str(BASE), start_new_session=True)
+            except OSError as e:
+                raise HTTPException(500, "could not start the test: %s" % e)
+        _nettest.update(proc=proc, seconds=seconds, started=time.time())
+    return {"started": True, "seconds": seconds}
+
+
+@app.post("/tools/nettest/stop")
+async def nettest_stop(who: Who = Depends(need("display"))):
+    """Ends the running test early; what was measured so far is still saved as a short run."""
+    run = nettest_running()
+    if not run:
+        return {"stopped": False}
+    try:
+        cmd = subprocess.run(["ps", "-p", str(run["pid"]), "-o", "command="], capture_output=True, text=True, timeout=5).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        cmd = ""
+    if "nettest.py" not in cmd:
+        raise HTTPException(409, "the running process is not the network test")
+    os.kill(run["pid"], signal.SIGTERM)
+    return {"stopped": True}
+
+
+@app.get("/tools/nettest/status")
+async def nettest_status(who: Who = Depends(need("display"))):
+    run = nettest_running()
+    out = {"running": bool(run), "error": None if run else nettest_error(), "last": nettest_last()}
+    if run:
+        dur = int(run["duration_s"] or 0)
+        out.update(elapsed_s=round(max(0.0, min(time.time() - float(run["started"]), dur + 45 if dur else 1e9)), 1), duration_s=dur, id=run["id"])
+    return out
+
+
+@app.get("/tools/nettest/report", response_class=HTMLResponse)
+async def nettest_report(run: str = Query("latest", pattern=NETTEST_RUN_RE), who: Who = Depends(need("display"))):
+    """The saved report page of a run. It shows where the RV was, so it is only served to a valid token."""
+    nt = nettest_mod()
+    d = nt.latest_dir() if run == "latest" else nt.RUN_DIR / run
+    f = (d / "report.html") if d else None
+    if not f or not f.exists():
+        raise HTTPException(404, "No report yet. Run a test first.")
+    return HTMLResponse(f.read_text(), headers={"Cache-Control": "no-store"})
+
+
+@app.get("/tools/nettest/compare", response_class=HTMLResponse)
+async def nettest_compare(who: Who = Depends(need("display"))):
+    """compare.html made fresh from every saved run."""
+    nt = nettest_mod()
+
+    def build():
+        path, _n = nt.write_compare()
+        return path.read_text()
+    page = await asyncio.get_running_loop().run_in_executor(None, build)
+    return HTMLResponse(page, headers={"Cache-Control": "no-store"})
+
+
 CAM_NAME_RE = "^(all|%s)$" % "|".join(c for c, _ in CAMS)
 
 
@@ -2366,10 +2494,21 @@ form button{padding:12px 14px}
 .bb-ticks{position:relative;height:28px;margin:0 12px}
 .bb-ticks i{position:absolute;top:0;width:1px;height:5px;margin-left:-.5px;background:var(--fg);opacity:.45}
 .bb-ticks i.m{height:9px;opacity:.8}
+.res{border:1px solid var(--line);border-radius:12px;background:var(--card);padding:12px 14px;margin-bottom:10px}
+.res .v{font-size:20px;font-weight:700}
+.res .sub{font-size:14px;opacity:.8;margin-top:2px}
+.tiles{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:10px}
+.tiles div{border:1px solid var(--line);border-radius:10px;padding:8px 10px;font-size:13px}
+.tiles b{display:block;font-size:19px}
+.res ul{margin:10px 0 0;padding-left:18px;font-size:14px;opacity:.85}
+.bar{height:8px;border-radius:4px;background:var(--line);overflow:hidden;margin-top:8px}
+.bar i{display:block;height:100%;width:0;background:var(--acc);transition:width .6s linear}
+#rep{width:100%;height:calc(100vh - 140px);min-height:460px;border:1px solid var(--line);border-radius:12px;background:transparent}
 .bb-ticks b{position:absolute;top:12px;transform:translateX(-50%);font-size:11px;font-weight:500;opacity:.75}
 </style></head><body>
 <h1 id="title">RV TV</h1>
 <div id="st">Checking TV...</div>
+<div id="tvctl">
 <div class="grid">
  <button class="on" data-act="power_on" onclick="go('/power/on?wait=30','Waking the TV (up to 30 s)...')">Power on</button>
  <button data-act="power_off" onclick="go('/power/off','Turning off...')">Power off</button>
@@ -2381,6 +2520,7 @@ form button{padding:12px 14px}
 <div class="grid">
  <button data-act="mute" onclick="go('/mute/on','')">Mute</button>
  <button data-act="mute" onclick="go('/mute/off','')">Unmute</button>
+</div>
 </div>
 <div id="v-main">
 <div class="grid">
@@ -2402,7 +2542,8 @@ form button{padding:12px 14px}
  </div>
  <button data-act="display" onclick="go('/display/open?page=sheet','Opening the sheet on the Mac (up to 40 s)...')">SNOW</button>
  <button data-act="display" onclick="go('/display/close','Closing the screen...')">Close screen</button>
- <button class="wide" data-act="display" onclick="view('cam')">BatCam</button>
+ <button data-act="display" onclick="view('cam')">BatCam</button>
+ <button data-act="display" onclick="view('tools')">Tools</button>
 </div>
 <form data-act="admin" onsubmit="setPlace(event)">
  <input id="place" placeholder="Weather place, e.g. Moab, Utah" autocomplete="off">
@@ -2439,6 +2580,56 @@ form button{padding:12px 14px}
  <button data-act="display" onclick="view('cam')">Back</button>
  <button data-act="display" onclick="home()">Home</button>
 </div>
+</div>
+<div id="v-tools" hidden>
+<div class="grid">
+ <button class="wide" data-act="display" onclick="view('nettest')">Network test</button>
+</div>
+<div class="grid">
+ <button class="wide" data-act="display" onclick="home()">Home</button>
+</div>
+</div>
+<div id="v-nettest" hidden>
+<div class="grid">
+ <button id="nt-go10" class="on" data-act="display" onclick="ntStart(600)">Start 10 min</button>
+ <button id="nt-go1" data-act="display" onclick="ntStart(60)">Quick 1 min</button>
+</div>
+<div class="grid">
+ <button id="nt-stop" class="wide" data-act="display" onclick="ntStop()" disabled>Stop</button>
+</div>
+<div class="res" id="nt-prog" hidden>
+ <div id="nt-ptxt">Testing...</div>
+ <div class="bar"><i id="nt-bar"></i></div>
+ <div class="sub">Uses about 3 Mbit/s while it runs. Streaming or calls on the RV network will show up in the numbers.</div>
+</div>
+<div class="res" id="nt-res" hidden>
+ <div class="v" id="nt-verdict"></div>
+ <div class="sub" id="nt-sum"></div>
+ <div class="sub" id="nt-when"></div>
+ <div class="tiles">
+  <div>Call quality<b id="nt-score"></b></div>
+  <div>Round trip<b id="nt-rtt"></b></div>
+  <div>Slowest 5%<b id="nt-p95"></b></div>
+  <div>Jitter<b id="nt-jit"></b></div>
+  <div>Packet loss<b id="nt-loss"></b></div>
+  <div>Longest dropout<b id="nt-drop"></b></div>
+ </div>
+ <ul id="nt-notes"></ul>
+</div>
+<div class="grid">
+ <button id="nt-rep" data-act="display" onclick="ntShow('report')" disabled>Full report</button>
+ <button data-act="display" onclick="ntShow('compare')">Compare places</button>
+</div>
+<div class="grid">
+ <button data-act="display" onclick="view('tools')">Back</button>
+ <button data-act="display" onclick="home()">Home</button>
+</div>
+</div>
+<div id="v-report" hidden>
+<div class="grid">
+ <button class="wide" data-act="display" onclick="view('nettest')">Back</button>
+</div>
+<iframe id="rep" sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox" title="Network test"></iframe>
 </div>
 <script>
 var T=location.hash.slice(1);
@@ -2491,14 +2682,88 @@ async function batboard(){
   }catch(e){show('Cannot reach the TV box. Are you on the RV Wi-Fi?');return}
   go('/display/open','Map '+m+' miles. Waking the TV and opening the dashboard (up to 40 s)...');
 }
+var CUR='main', ntTimer=null;
 function view(v){
-  var titles={main:'RV TV',cam:'BatCam',canny:'Canny'};
-  ['main','cam','canny'].forEach(function(n){document.getElementById('v-'+n).hidden=(n!==v)});
+  var titles={main:'RV TV',cam:'BatCam',canny:'Canny',tools:'Tools',nettest:'Network test',report:'Report'};
+  Object.keys(titles).forEach(function(n){document.getElementById('v-'+n).hidden=(n!==v)});
   document.getElementById('title').textContent=titles[v];
   document.title=titles[v];
+  CUR=v;
+  document.getElementById('tvctl').hidden=(v==='report');   // the report gets the whole screen
+  if(ntTimer){clearInterval(ntTimer);ntTimer=null}
   if(v==='cam')show('BatCam: press Login if the cameras say 401, then Load.');
   else if(v==='canny'){show('Canny: pick a camera.');loadCams()}
+  else if(v==='tools')show('Tools');
+  else if(v==='nettest'){ntRefresh();ntTimer=setInterval(ntRefresh,3000)}
+  else if(v==='report'){}
   else refresh();
+}
+function ntClock(s){s=Math.max(0,Math.round(s));return Math.floor(s/60)+':'+('0'+(s%60)).slice(-2)}
+var NTICON=['✓','▲','✕'];
+function ntSet(id,t){document.getElementById(id).textContent=t}
+function ntNum(v,u,d){return (v===null||v===undefined)?'-':Number(v).toFixed(d||0)+(u||'')}
+function ntRender(j){
+  document.getElementById('nt-go10').disabled=j.running;
+  document.getElementById('nt-go1').disabled=j.running;
+  document.getElementById('nt-stop').disabled=!j.running;
+  var pr=document.getElementById('nt-prog');pr.hidden=!j.running;
+  if(j.running){
+    var f=j.duration_s?Math.min(1,j.elapsed_s/j.duration_s):0;
+    document.getElementById('nt-bar').style.width=(f*100).toFixed(1)+'%';
+    ntSet('nt-ptxt','Testing '+ntClock(j.elapsed_s)+(j.duration_s?' of '+ntClock(j.duration_s):''));
+  }
+  var L=j.last,res=document.getElementById('nt-res');
+  res.hidden=!L;
+  document.getElementById('nt-rep').disabled=!L;
+  if(L){
+    var rk=(L.rank===0||L.rank===1||L.rank===2)?L.rank:2;
+    ntSet('nt-verdict',NTICON[rk]+' '+(L.verdict||'').charAt(0)+(L.verdict||'').slice(1).toLowerCase());
+    ntSet('nt-sum',L.summary||'');
+    var d=L.started?new Date(L.started*1000).toLocaleString([],{weekday:'short',hour:'numeric',minute:'2-digit'}):'';
+    var len=L.sent>=60?Math.round(L.sent/60*10)/10+' min':(L.sent||0)+' s';
+    ntSet('nt-when',[L.place||'place unknown',d,len+(L.partial?' (stopped early)':'')+(L.udp?'':', ping only')].join(' · '));
+    var n=L.numbers||{};
+    ntSet('nt-score',ntNum(L.mos,' / 5',1));ntSet('nt-rtt',ntNum(n.rtt_avg,' ms'));ntSet('nt-p95',ntNum(n.rtt_p95,' ms'));
+    ntSet('nt-jit',ntNum(n.jitter_ms,' ms',1));ntSet('nt-loss',ntNum(n.loss_pct,' %',1));ntSet('nt-drop',ntNum(n.longest_lost,' s'));
+    var ul=document.getElementById('nt-notes');ul.textContent='';
+    (L.notes||[]).forEach(function(t){var li=document.createElement('li');li.textContent=t;ul.appendChild(li)});
+  }
+  if(j.running)show('Network test running...');
+  else if(j.error)show('The test did not run: '+j.error);
+  else show(L?'Last test is below.':'No test yet. Press Start.');
+}
+async function ntRefresh(){
+  try{
+    var r=await api('GET','/tools/nettest/status');
+    if(r.status==401){show('This link is not valid any more. Ask Devon for a new one.');return}
+    if(r.status==403){show('Not allowed for your link.');return}
+    if(!r.ok){show('Status unavailable ('+(r.j.detail||r.status)+')');return}
+    ntRender(r.j);
+  }catch(e){show('Cannot reach the TV box. Are you on the RV Wi-Fi?')}
+}
+async function ntStart(sec){
+  show('Starting the '+(sec>=600?'10 minute':'1 minute')+' test...');
+  try{
+    var r=await api('POST','/tools/nettest/start?seconds='+sec);
+    if(r.status==409){show('A test is already running.')}
+    else if(!r.ok){show('Could not start: '+(r.j.detail||r.status));return}
+  }catch(e){show('Cannot reach the TV box. Are you on the RV Wi-Fi?');return}
+  ntRefresh();
+}
+async function ntStop(){
+  show('Stopping...');
+  try{await api('POST','/tools/nettest/stop')}catch(e){show('Cannot reach the TV box.');return}
+  setTimeout(ntRefresh,1500);
+}
+async function ntShow(kind){
+  view('report');show('Loading...');
+  var f=document.getElementById('rep');f.srcdoc='';
+  try{
+    var r=await fetch('/tools/nettest/'+kind,{headers:{Authorization:'Bearer '+T}});
+    var t=await r.text();
+    if(!r.ok){var m='';try{m=JSON.parse(t).detail}catch(e){}show(m||('Could not load ('+r.status+')'));return}
+    f.srcdoc=t;show(kind==='report'?'Report. Touch the graphs for the numbers.':'Compare places. Tick runs in the table to show them.');
+  }catch(e){show('Cannot reach the TV box. Are you on the RV Wi-Fi?')}
 }
 async function loadCams(){
   var box=document.getElementById('canny-btns');
@@ -2570,7 +2835,7 @@ async function refresh(){
       if(d.ok&&d.j.batcam)line+=' - BatCam open on the Mac';
       if(d.ok&&d.j.map&&!BB.touched){document.getElementById('bbr').value=d.j.map.miles;bbShow()}
     }
-    show(line);
+    if(CUR!=='nettest'&&CUR!=='report')show(line);
   }catch(e){show('Cannot reach the TV box. Are you on the RV Wi-Fi?')}
 }
 bbInit();refresh();setInterval(refresh,15000);

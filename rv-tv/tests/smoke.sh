@@ -7,7 +7,7 @@ set -uo pipefail
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 PY="$HERE/.venv/bin/python"; [ -x "$PY" ] || PY=python3
 T=$(mktemp -d); MOCK_PORT=3198; API_PORT=8798; STUB_PORT=8799
-cleanup() { for p in ${P1:-} ${P2:-} ${P3:-} ${P4:-} ${P5:-} ${P6:-} ${P7:-}; do kill $p 2>/dev/null; done; rm -rf "$T"; }
+cleanup() { for p in ${P1:-} ${P2:-} ${P3:-} ${P4:-} ${P5:-} ${P6:-} ${P7:-} ${P8:-}; do kill $p 2>/dev/null; done; rm -rf "$T"; }
 trap cleanup EXIT
 openssl req -x509 -newkey rsa:2048 -nodes -days 2 -subj /CN=mock -keyout $T/mock.key -out $T/mock.crt 2>/dev/null
 echo mockkey123 > $T/key.txt   # the key the fake TV accepts
@@ -260,6 +260,43 @@ assert d['Label'] == 'com.lowone.camtunnel' and d['KeepAlive'] is True and d['Ru
 assert a[0] == '/usr/bin/ssh' and a[-1] == 'oracle-r' and '127.0.0.1:1984:127.0.0.1:1984' in a and 'ExitOnForwardFailure=yes' in a, a
 " 2>$T/tun.err; then echo "ok   tunnel agent plist is valid (ssh -L 1984 to oracle-r, KeepAlive)"; else echo "FAIL tunnel agent plist"; cat $T/tun.err; fail=1; fi
 if TV_CAMS_SSH_HOST=cam-host TV_CAMS_PORT=1999 bash "$HERE/install-cams-tunnel.sh" --print | grep -q '<string>cam-host</string>'; then echo "ok   tunnel host is configurable"; else echo "FAIL tunnel host override"; fail=1; fi
+
+echo "-- phone menu: Tools > Network test (stand-in test target: the server's own port, a real 1/s probe)"
+mkdir -p $T/nt
+TV_SERVER_PORT=8793 TV_DISPLAY_FILE=$T/nt/display.json TV_LOCATION_FILE=$T/none.loc TV_NETTEST_DIR=$T/nt/runs \
+  TV_NETTEST_PING="" TV_NETTEST_IPERF="" TV_NETTEST_TCP="local=127.0.0.1:8793" $PY "$HERE/tvserver.py" > $T/server8.log 2>&1 & P8=$!
+for i in $(seq 1 30); do curl -fs http://127.0.0.1:8793/health >/dev/null 2>&1 && break; sleep 0.3; done
+B8=http://127.0.0.1:8793
+body "main menu has BatCam and Tools side by side" "view('tools')\">Tools</button>" $B8/guest
+body "Tools page has the Network test button"       "view('nettest')\">Network test" $B8/guest
+chk "nettest status needs a token"                 401 $B8/tools/nettest/status
+chk "guest without display cannot see status"      403 -H "$A $N" $B8/tools/nettest/status
+chk "guest without display cannot start"           403 -X POST -H "$A $N" "$B8/tools/nettest/start?seconds=10"
+chk "guest without display cannot read the report" 403 -H "$A $N" $B8/tools/nettest/report
+chk "guest without display cannot compare"         403 -H "$A $N" $B8/tools/nettest/compare
+body "idle: nothing running, no result yet"        '"running":false' -H "$A $D" $B8/tools/nettest/status
+body "idle: last is empty"                         '"last":null' -H "$A $D" $B8/tools/nettest/status
+chk "no report before the first run"               404 -H "$A $D" $B8/tools/nettest/report
+chk "run id is checked"                            422 -H "$A $D" "$B8/tools/nettest/report?run=../etc"
+chk "too short a test is refused"                  422 -X POST -H "$A $D" "$B8/tools/nettest/start?seconds=5"
+body "stop with nothing running is harmless"       '"stopped":false' -X POST -H "$A $D" $B8/tools/nettest/stop
+body "display link starts a 10 s test"             '"started":true' -X POST -H "$A $D" "$B8/tools/nettest/start?seconds=10"
+chk "a second start is refused"                    409 -X POST -H "$A $D" "$B8/tools/nettest/start?seconds=10"
+sleep 3
+body "status shows it running with its length"     '"duration_s":10' -H "$A $D" $B8/tools/nettest/status
+body "status says running"                         '"running":true' -H "$A $D" $B8/tools/nettest/status
+sleep 13
+body "finished: not running any more"              '"running":false' -H "$A $D" $B8/tools/nettest/status
+body "finished: result has a verdict and a score"  '"verdict":"GOOD"' -H "$A $D" $B8/tools/nettest/status
+body "report page is served to a valid token"      'Video call network test' -H "$A $D" $B8/tools/nettest/report
+body "compare page is served to a valid token"     'Compare network runs' -H "$A $D" $B8/tools/nettest/compare
+body "compare lists the run"                       '1 run saved' -H "$A $D" $B8/tools/nettest/compare
+body "a second test starts"                        '"started":true' -X POST -H "$A $D" "$B8/tools/nettest/start?seconds=60"
+sleep 3
+body "stop ends it"                                '"stopped":true' -X POST -H "$A $D" $B8/tools/nettest/stop
+sleep 5
+body "after stop: not running"                     '"running":false' -H "$A $D" $B8/tools/nettest/status
+body "after stop: saved as a stopped-early run"    '"partial":true' -H "$A $D" $B8/tools/nettest/status
 
 echo "-- concurrent requests (guest page and dashboard polling at once)"
 pids=""; : > $T/par.txt

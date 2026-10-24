@@ -120,6 +120,14 @@ report, `latest` prints the newest folder, `--duration 60` shortens the test, Ct
 - **Rescore:** `python3 nettest.py rescore [DIR...]` judges saved runs again under the current rules (default all):
   verdicts, jitter and the explanatory notes change, the measurements do not. The first `result.json` is kept as
   `result.orig.json`; reports and `history.jsonl` are redrawn.
+- **From the phone menu:** the BatCam button is now BatCam | Tools (both need the `display` permission). Tools >
+  Network test has Start 10 min, Quick 1 min and Stop, a progress bar while it runs, then the verdict, score and
+  numbers of the last run, **Full report** (the report page with its graphs) and **Compare places**. The server
+  starts `nettest.py` in the background (one test at a time; output in `.run/nettest/last.log`) with `/opt/homebrew/bin`
+  added to its PATH, since launchd's PATH has no `iperf3`. Endpoints, all `display`: `POST /tools/nettest/start?seconds=`,
+  `POST /tools/nettest/stop`, `GET /tools/nettest/status`, `GET /tools/nettest/report?run=latest|<id>`,
+  `GET /tools/nettest/compare`. Reports hold the RV's coordinates, so they are only served to a valid token and shown
+  in a sandboxed frame. After pulling: `bash install-tvserver.sh` to restart the service.
 - Checks: `python3 tests/test_nettest.py` (about 40 s; uses stand-in `tests/fakeping.py` and `fakeiperf.py`, and a
   real iperf3 over loopback when one is installed; the fixtures in `tests/fixtures/` are real iperf3 3.22 output).
 
