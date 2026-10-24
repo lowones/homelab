@@ -150,7 +150,38 @@ res = run_of(plan_of("a", "b", "c"), {n: {"ping": FakeRtt(wobble(N, base))} for 
 o = res["overall"]
 check("clean link: good", o["verdict"] == "GOOD" and o["rank"] == 0 and o["mos"] >= 4.2, o)
 check("clean link: numbers present", o["usable"] == 3 and close(o["loss_pct"], 0) and o["longest_lost"] == 0 and o["rtt_avg"] > 0, o)
-check("clean link: no complaints", not res["notes"], res["notes"])
+check("clean link: no complaints (only the missing location fix)", [n for n in res["notes"] if "location fix" not in n] == [], res["notes"])
+check("no location file: run is saved without a place and says so", res["place"] is None and res["geo"] is None and any("location fix" in n for n in res["notes"]), res["notes"])
+
+# ---- one lost ping is noise, three are not --------------------------------------------------------
+one = wobble(60, 30.0); one[20] = None
+three = wobble(60, 30.0); three[20] = three[21] = three[40] = None
+r_one = run_of(plan_of("a", "b", "c"), {"a": {"ping": FakeRtt(one)}, "b": {"ping": FakeRtt(wobble(60, 40.0))}, "c": {"ping": FakeRtt(wobble(60, 25.0))}})
+check("1 lost ping in 60: not called a weak path", r_one["overall"]["rank"] == 0 and r_one["targets"][0]["verdict"] == "GOOD"
+      and not any("weaker" in n for n in r_one["notes"]) and close(r_one["targets"][0]["metrics"]["loss_pct"], 1.67), (r_one["targets"][0]["verdict"], r_one["notes"]))
+r_three = run_of(plan_of("a", "b", "c"), {"a": {"ping": FakeRtt(three)}, "b": {"ping": FakeRtt(wobble(60, 40.0))}, "c": {"ping": FakeRtt(wobble(60, 25.0))}})
+check("3 lost pings in 60 (5%): still flagged", r_three["targets"][0]["verdict"] != "GOOD" and any("a is weaker" in n for n in r_three["notes"]), (r_three["targets"][0]["verdict"], r_three["notes"]))
+
+# ---- the location fix -----------------------------------------------------------------------------
+LOC = TMP / "location.raw"
+nt.LOCATION_FILE = LOC
+LOC.write_text("44.0521|-123.0868|35.4|Cloverdale|OR\n")
+f = nt.location_fix()
+check("location fix: place, coordinates (4 places), accuracy", f and f["place"] == "Cloverdale, OR" and f["lat"] == 44.0521 and f["lon"] == -123.0868 and f["accuracy_m"] == 35, f)
+LOC.write_text("44.052149|-123.08684|10|(null)|(null)\n")
+f = nt.location_fix()
+check("location fix: coordinates without a city still count", f and f["place"] is None and f["lat"] == 44.0521 and f["lon"] == -123.0868, f)
+LOC.write_text("95.0|-123.0|10|Nowhere|XX\n")
+f = nt.location_fix()
+check("location fix: impossible latitude is dropped, the place stays", f and f["lat"] is None and f["lon"] is None and f["place"] == "Nowhere, XX", f)
+LOC.write_text("abc|def||(null)|(null)\n")
+check("location fix: nothing usable -> None", nt.location_fix() is None)
+LOC.write_text("44.0|-123.0|10|Cloverdale|OR\n")
+old = time.time() - 7 * 3600
+os.utime(str(LOC), (old, old))
+check("location fix: older than 6 hours -> None", nt.location_fix() is None and nt.place_label() is None)
+LOC.unlink()
+check("location fix: no file -> None", nt.location_fix() is None)
 check("targets keep their colour slot", [tg["slot"] for tg in res["targets"]] == [0, 1, 2])
 
 drop = wobble(N)
@@ -328,6 +359,69 @@ if real:
           (r4 and r4["targets"][0]["errors"], cp.stdout[-300:]))
 else:
     print("skip real iperf3 (not installed)")
+
+# ---- history log and the compare page -------------------------------------------------------------
+hist1 = runs1 / "history.jsonl"
+lines = hist1.read_text().splitlines() if hist1.exists() else []
+check("history: one line per run (2 runs -> 2 lines)", len(lines) == 2, lines[:1])
+if lines:
+    h0 = json.loads(lines[0])
+    first = json.loads(sorted(runs1.glob("*/result.json"))[0].read_text())
+    check("history: place, coordinates and accuracy are logged", h0["place"] == "Cloverdale, OR" and h0["lat"] == 45.0 and h0["lon"] == -123.9 and h0["accuracy_m"] == 60, h0)
+    check("history: result.json carries the geo tag", first["geo"]["lat"] == 45.0 and first["geo"]["accuracy_m"] == 60 and first["version"] == 2, first.get("geo"))
+    check("history: 12 s run -> two 10 s points, four series", all(len(h0["bins"][k]) == 2 for k in ("p50", "p95", "jitter", "loss")) and h0["bin_s"] == 10, h0["bins"])
+    check("history: marked short, with the verdict numbers", h0["short"] and h0["verdict"] and h0["mos"] and h0["targets"] and h0["id"] == first["id"], h0)
+nt.RUN_DIR = runs1
+check("history: syncing again adds nothing", nt.sync_history() == 0)
+hist1.unlink()
+cp = run_tool(["history"], runs1)
+check("history: rebuilt from the saved runs (backfill)", len(hist1.read_text().splitlines()) == 2 and "Cloverdale, OR" in cp.stdout and "*" in cp.stdout, cp.stdout)
+with open(str(hist1), "a") as fh:
+    fh.write("this is not json\n")
+check("history: a damaged line is skipped, not fatal", len(nt.read_history()) == 2)
+
+b = nt.rtt_bins([{"rtt": {"received": 1, "series": [10.0, 20.0, None, 40.0] + [None] * 6 + [100.0] * 10}}], 20)
+check("bins: median, 95th, jitter and loss per 10 s", b["p50"] == [20.0, 100.0] and b["loss"] == [70.0, 0.0] and b["jitter"] == [10.0, 0.0] and b["p95"][1] == 100.0, b)
+b = nt.rtt_bins([{"rtt": {"received": 1, "series": [None] * 10 + [5.0, None, None, None, None, None, None, None, None, None]}}], 20)
+check("bins: a bin where nothing answered is None, not zero", b["p50"][0] is None and b["jitter"][0] is None and b["loss"][0] == 100.0 and b["jitter"][1] is None, b)
+
+recs = [
+    {"v": 1, "id": "20261001-100000", "started": 1790000000, "place": "Cloverdale, OR", "lat": 45.0, "lon": -123.9, "accuracy_m": 60, "sent": 600, "partial": False,
+     "short": False, "verdict": "GOOD", "rank": 0, "mos": 4.4, "rtt_avg": 38, "rtt_p95": 83, "jitter_ms": 14, "loss_pct": 0, "longest_lost": 1, "usable": 5, "of": 5,
+     "targets": ["a", "b"], "udp": False, "bin_s": 10, "bins": {"p50": [30.0] * 60, "p95": [80.0] * 60, "jitter": [3.0] * 60, "loss": [0.0] * 60}},
+    {"v": 1, "id": "20261002-110000", "started": 1790090000, "place": "Seaside <script>alert(1)</script>, OR", "lat": None, "lon": None, "accuracy_m": None, "sent": 600,
+     "partial": False, "short": False, "verdict": "POOR", "rank": 2, "mos": 2.9, "rtt_avg": 120, "rtt_p95": 400, "jitter_ms": 50, "loss_pct": 6, "longest_lost": 9, "usable": 5, "of": 5,
+     "targets": ["a", "b"], "udp": True, "bin_s": 10, "bins": {"p50": [100.0] * 30 + [None] * 2 + [90.0] * 28, "p95": [400.0] * 30 + [None] * 2 + [300.0] * 28, "jitter": [40.0] * 60, "loss": [5.0] * 60}},
+    {"v": 1, "id": "20261003-120000", "started": 1790100000, "place": "Newport, OR", "lat": 44.6, "lon": -124.05, "accuracy_m": 20, "sent": 60, "partial": False,
+     "short": True, "verdict": "MARGINAL", "rank": 1, "mos": 4.0, "rtt_avg": 50, "rtt_p95": 120, "jitter_ms": 20, "loss_pct": 1.7, "longest_lost": 1, "usable": 5, "of": 5,
+     "targets": ["a", "b"], "udp": False, "bin_s": 10, "bins": {"p50": [50.0] * 6, "p95": [120.0] * 6, "jitter": [9.0] * 6, "loss": [1.0] * 6}}]
+page = nt.render_compare(recs)
+check("compare: self-contained (no external scripts, styles or fonts)", "<script src" not in page and "<link" not in page and "@import" not in page)
+check("compare: place names are escaped in the table", "<script>alert(1)</script>" not in page and "Seaside &lt;script&gt;" in page)
+cd = json.loads(page.split('id="cmp-data">')[1].split("</script>")[0].replace("\\u003c", "<"))
+check("compare: embedded data is valid, three runs, 8 at most", len(cd["runs"]) == 3 and cd["max"] == 8, cd["max"])
+check("compare: short run is not drawn by default", cd["init"] == ["20261001-100000", "20261002-110000"], cd["init"])
+check("compare: a run with no coordinates still has a row and no map link", page.count("openstreetmap.org") == 2 and "mlat=45.00000" in page, page.count("openstreetmap.org"))
+check("compare: short rows are flagged for hiding", page.count('class="short"') == 1)
+check("compare: coordinates and accuracy shown", "45.0000, -123.9000 ±60 m" in page)
+check("compare: sorted newest first", page.index("20261003-120000") < page.index("20261002-110000") < page.index("20261001-100000"))
+only_short = nt.render_compare(recs[2:])
+check("compare: only short runs -> they are drawn anyway", json.loads(only_short.split('id="cmp-data">')[1].split("</script>")[0])["init"] == ["20261003-120000"])
+many = [dict(recs[0], id="2026100%d-100000" % i, started=1790000000 + i) for i in range(1, 10)]
+cdm = json.loads(nt.render_compare(many).split('id="cmp-data">')[1].split("</script>")[0])
+check("compare: nine runs -> the eight newest are drawn", len(cdm["init"]) == 8 and cdm["init"][-1] == "20261009-100000", cdm["init"])
+check("compare: empty history is a message, not a crash", "No runs saved" in nt.render_compare([]))
+js = page.split("<script>")[-1].split("</script>")[0]
+if shutil.which("node"):
+    (TMP / "cmp.js").write_text(js)
+    cp = subprocess.run(["node", "--check", str(TMP / "cmp.js")], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True)
+    check("compare: page script parses", cp.returncode == 0, cp.stdout)
+cp = run_tool(["compare"], runs1)
+check("compare subcommand writes compare.html next to the runs", cp.returncode == 0 and (runs1 / "compare.html").exists() and "2 runs" in cp.stdout, cp.stdout)
+cp = run_tool(["compare", "--out", str(TMP / "x" / "c.html")], runs1)
+check("compare --out", (TMP / "x" / "c.html").exists(), cp.stdout)
+cp = run_tool(["compare"], TMP / "empty-runs")
+check("compare with no runs says so and exits 2", cp.returncode == 2, (cp.returncode, cp.stdout))
 
 srv.close()
 shutil.rmtree(TMP, ignore_errors=True)

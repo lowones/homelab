@@ -5,6 +5,8 @@
     python3 nettest.py --duration 60   shorter test (seconds)
     python3 nettest.py report [DIR]    re-render report.html from a saved result (default: latest)
     python3 nettest.py latest          print the folder of the latest run
+    python3 nettest.py history         list every saved run (place, time, numbers)
+    python3 nettest.py compare         write compare.html: all saved runs on one graph, to compare places and times
 
 What it does for the whole test, all at once:
   * ping (1 per second) to every target       -> round-trip time, jitter, loss
@@ -63,6 +65,7 @@ load_env()
 
 RUN_DIR = Path(os.environ.get("TV_NETTEST_DIR") or (BASE / ".run" / "nettest"))
 LOCATION_FILE = Path(os.environ.get("TV_LOCATION_FILE") or (BASE / ".run" / "location.raw"))
+HISTORY_NAME = "history.jsonl"
 DEFAULT_SECONDS = 600
 DEFAULT_PING = "cloudflare=1.1.1.1,google=8.8.8.8"
 DEFAULT_TCP = "meet=meet.google.com:443,zoom=zoom.us:443,teams=teams.microsoft.com:443"
@@ -78,6 +81,10 @@ MARGINAL = {"loss": 3.0, "jitter": 60.0, "rtt": 300.0, "mos": 3.6}    # all must
 OUTAGE_MARGINAL = 3          # a dropout this many seconds long makes calls freeze: at least MARGINAL
 OUTAGE_POOR = 8              # this long: calls drop: POOR
 WINDOW = 10                  # seconds, for the "worst 10 s" number
+MIN_LOST = 3                 # fewer lost pings than this is not evidence of a bad path (1 in 60 reads as 1.7 %)
+BIN_S = 10                   # seconds per point in the saved history (what the compare graph plots)
+SHORT_S = 300                # a run shorter than this is "short": kept in the history, hidden in compare by default
+MAX_COMPARE = 8              # runs drawn at once (one colour each; a 9th would have to repeat a colour)
 VERDICTS = ["GOOD", "MARGINAL", "POOR"]
 
 # Categorical colours (reference palette, fixed order, light / dark). A target keeps its slot by its
@@ -195,18 +202,42 @@ def summary_sentence(rank):
             "Video calls will struggle: expect freezing, robotic audio or dropped calls."][rank]
 
 
+def location_fix():
+    """The Mac's own location fix ('lat|lon|accuracy_m|city|state') if it is fresh (under 6 hours), else None.
+    Returns {'place', 'lat', 'lon', 'accuracy_m', 'age_s'}; each part is None when it is missing or invalid."""
+    try:
+        age = time.time() - LOCATION_FILE.stat().st_mtime
+        if age > 6 * 3600:
+            return None
+        parts = LOCATION_FILE.read_text().strip().split("|") + [""] * 5
+    except OSError:
+        return None
+
+    def num(s, lo, hi):
+        try:
+            v = float(s)
+        except ValueError:
+            return None
+        return v if lo <= v <= hi else None
+
+    lat, lon = num(parts[0], -90, 90), num(parts[1], -180, 180)
+    if lat is None or lon is None:
+        lat = lon = None
+    acc = num(parts[2], 0, 1e7)
+    city, state = parts[3].strip(), parts[4].strip()
+    place = None
+    if city and city != "(null)":
+        place = "%s, %s" % (city, state) if state and state != "(null)" else city
+    if place is None and lat is None:
+        return None
+    return {"place": place, "lat": None if lat is None else round(lat, 4), "lon": None if lon is None else round(lon, 4),
+            "accuracy_m": None if acc is None else int(round(acc)), "age_s": int(age)}
+
+
 def place_label():
     """'Cloverdale, OR' from the Mac's own location fix if it is fresh, else None."""
-    try:
-        if time.time() - LOCATION_FILE.stat().st_mtime > 6 * 3600:
-            return None
-        parts = LOCATION_FILE.read_text().strip().split("|")
-        city, state = parts[3].strip(), parts[4].strip()
-        if city and city != "(null)":
-            return "%s, %s" % (city, state) if state and state != "(null)" else city
-    except (OSError, IndexError):
-        pass
-    return None
+    fix = location_fix()
+    return fix["place"] if fix else None
 
 
 # ====================================================================================================
@@ -484,11 +515,14 @@ def summarize_target(entry, probes, sent):
         t["no_data"] = True
         return t
     losses = [rtt["loss_pct"]] if rtt else []
+    # a couple of lost pings is noise, not a bad path: the verdict only counts ping loss from MIN_LOST packets up
+    verdict_losses = [rtt["loss_pct"] if rtt["lost_total"] >= MIN_LOST else 0.0] if rtt else []
     jitters = []
     if t["udp"]:
         for d in ("up", "down"):
             if t["udp"][d]:
                 losses.append(t["udp"][d]["loss_pct"])
+                verdict_losses.append(t["udp"][d]["loss_pct"])
                 if t["udp"][d]["jitter_ms"] is not None:
                     jitters.append(t["udp"][d]["jitter_ms"])
     loss = max(losses) if losses else 0.0
@@ -497,7 +531,7 @@ def summarize_target(entry, probes, sent):
     p95 = rtt["p95"] if have_rtt else None
     longest = rtt["longest_lost"] if rtt else 0
     mos = mos_score(avg, jitter, loss)
-    rank, reasons = verdict_for(loss, jitter, p95, mos, longest)
+    rank, reasons = verdict_for(max(verdict_losses) if verdict_losses else 0.0, jitter, p95, mos, longest)
     t["metrics"] = {"loss_pct": round(loss, 2), "jitter_ms": round(jitter, 1),
                     "rtt_avg": avg, "rtt_p95": p95, "mos": round(mos, 2), "longest_lost": longest,
                     "jitter_from": "udp" if jitters else "rtt"}
@@ -570,11 +604,106 @@ def build_result(run_id, started, duration, elapsed, partial, plan, probes_by_ta
             if bad:
                 notes.append("Most affected: %s." % "; ".join("%s (%s)" % (t["name"], ", ".join(t["reasons"])) for t in bad[:3]))
     overall["dropouts"] = {"events": len(drops), "longest_s": longest_common}
-    return {"version": 1, "id": run_id, "started": started, "duration_s": duration, "sent": sent,
-            "elapsed_s": round(elapsed, 1), "partial": partial, "host": platform.node(), "place": place_label(),
+    fix = location_fix()
+    if fix is None or fix["lat"] is None:
+        notes.append("No fresh location fix, so this run has no %s. It still counts in the history, just without a map point."
+                     % ("place or coordinates" if fix is None else "coordinates"))
+    return {"version": 2, "id": run_id, "started": started, "duration_s": duration, "sent": sent,
+            "elapsed_s": round(elapsed, 1), "partial": partial, "host": platform.node(),
+            "place": fix["place"] if fix else None,
+            "geo": {"lat": fix["lat"], "lon": fix["lon"], "accuracy_m": fix["accuracy_m"], "fix_age_s": fix["age_s"]}
+                   if fix and fix["lat"] is not None else None,
             "udp_kbps": kbps, "targets": targets, "overall": overall, "notes": notes,
             "thresholds": {"good": GOOD, "marginal": MARGINAL, "outage_marginal_s": OUTAGE_MARGINAL,
                            "outage_poor_s": OUTAGE_POOR}}
+
+
+# ====================================================================================================
+# history: one line per run in history.jsonl, so runs at different places and times can be compared
+# ====================================================================================================
+def history_path():
+    return RUN_DIR / HISTORY_NAME
+
+
+def rtt_bins(targets, sent, size=BIN_S):
+    """Per `size` seconds, all usable targets pooled: median and 95th round trip, jitter, % lost.
+    None where nothing answered (or, for jitter, where fewer than two replies came back)."""
+    series = [t["rtt"]["series"] for t in targets if t.get("rtt") and t["rtt"]["received"]]
+    out = {"p50": [], "p95": [], "jitter": [], "loss": []}
+    for s0 in range(0, max(sent, 0), size):
+        pooled, lost, total, jit = [], 0, 0, []
+        for s in series:
+            w = s[s0:s0 + size]
+            vals = [v for v in w if v is not None]
+            pooled.extend(vals)
+            lost += len(w) - len(vals)
+            total += len(w)
+            if len(vals) >= 2:
+                jit.append(rtt_jitter(w))
+        srt = sorted(pooled)
+        out["p50"].append(round(percentile(srt, 50), 1) if srt else None)
+        out["p95"].append(round(percentile(srt, 95), 1) if srt else None)
+        mj = median_of(jit)
+        out["jitter"].append(round(mj, 1) if mj is not None else None)
+        out["loss"].append(round(100.0 * lost / total, 1) if total else None)
+    return out
+
+
+def history_record(r):
+    """The compact line saved per run (everything compare needs; no per-target series)."""
+    o = r.get("overall", {})
+    geo = r.get("geo") or {}
+    sent = r.get("sent") or r.get("duration_s") or 0
+    return {"v": 1, "id": r["id"], "started": r["started"], "place": r.get("place"),
+            "lat": geo.get("lat"), "lon": geo.get("lon"), "accuracy_m": geo.get("accuracy_m"),
+            "duration_s": r.get("duration_s"), "sent": sent, "partial": bool(r.get("partial")),
+            "short": (r.get("elapsed_s") or sent) < SHORT_S, "host": r.get("host"),
+            "verdict": o.get("verdict"), "rank": o.get("rank"), "mos": o.get("mos"),
+            "rtt_avg": o.get("rtt_avg"), "rtt_p95": o.get("rtt_p95"), "jitter_ms": o.get("jitter_ms"),
+            "loss_pct": o.get("loss_pct"), "longest_lost": o.get("longest_lost"),
+            "usable": o.get("usable"), "of": o.get("of"),
+            "targets": sorted(t["name"] for t in r.get("targets", []) if not t.get("no_data")),
+            "udp": any(t.get("udp") for t in r.get("targets", [])),
+            "bin_s": BIN_S, "bins": rtt_bins(r.get("targets", []), sent)}
+
+
+def read_history():
+    """All saved history records, oldest first, one per run id (the last line for an id wins)."""
+    seen = {}
+    try:
+        lines = history_path().read_text().splitlines()
+    except OSError:
+        return []
+    for line in lines:
+        try:
+            rec = json.loads(line)
+            seen[rec["id"]] = rec
+        except (ValueError, KeyError, TypeError):
+            continue
+    return sorted(seen.values(), key=lambda x: x.get("started") or 0)
+
+
+def sync_history():
+    """Append a line for every saved run that is not in history.jsonl yet (this also fills in runs that
+    were saved before the history existed). Returns how many lines were added."""
+    have = {rec["id"] for rec in read_history()}
+    new = []
+    try:
+        dirs = sorted(d for d in RUN_DIR.iterdir() if d.is_dir() and (d / "result.json").exists())
+    except OSError:
+        return 0
+    for d in dirs:
+        if d.name in have:
+            continue
+        try:
+            new.append(history_record(json.loads((d / "result.json").read_text())))
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+    if new:
+        with open(str(history_path()), "a") as f:
+            for rec in new:
+                f.write(json.dumps(rec, separators=(",", ":")) + "\n")
+    return len(new)
 
 
 # ====================================================================================================
@@ -701,6 +830,10 @@ def run_test(args, say=print):
                 (out_dir / "raw" / ("%s-%s.%s" % (kind, e["name"], "json" if kind == "udp" else "txt"))).write_text(p.raw)
     result = build_result(run_id, started, duration, elapsed, partial, plan, by_target, kbps, iperf_note)
     (out_dir / "result.json").write_text(json.dumps(result))
+    try:
+        sync_history()
+    except OSError as e:
+        say("Could not update %s: %s" % (HISTORY_NAME, e))
     write_report(out_dir)
     print_summary(result, out_dir, say)
     return 0 if any(not t["no_data"] for t in result["targets"]) else 3
@@ -716,6 +849,10 @@ def fmt(v, unit="", nd=0):
 def print_summary(r, out_dir, say=print):
     o = r["overall"]
     say("")
+    geo = r.get("geo")
+    say("Logged: %s, %s%s" % (datetime.datetime.fromtimestamp(r["started"]).strftime("%a %b %d %H:%M"),
+                              r.get("place") or "place unknown",
+                              " (%.4f, %.4f)" % (geo["lat"], geo["lon"]) if geo else ""))
     say("%s  call quality %.1f / 5   %s%s" % (o["verdict"], o["mos"], o["summary"], "   (stopped early)" if r["partial"] else ""))
     if o.get("usable"):
         say("typical target: round trip %s (95th %s), jitter %s, loss %s, longest dropout %d s" % (
@@ -1060,6 +1197,269 @@ def write_report(run_dir):
     return run_dir / "report.html"
 
 
+# ====================================================================================================
+# compare: every saved run on one graph, for comparing places and times
+# ====================================================================================================
+CMP_CSS = """
+.ctl{display:flex;flex-wrap:wrap;gap:10px 18px;align-items:center;margin:0 0 10px}
+.ctl label{font-size:14px;color:var(--ink2);display:inline-flex;align-items:center;gap:6px}
+select{font:inherit;color:var(--ink);background:var(--bg);border:1px solid var(--grid);border-radius:8px;padding:5px 8px}
+.legend{display:flex;flex-wrap:wrap;gap:6px 18px;margin:10px 0 0;padding:0;list-style:none;font-size:13px}
+.legend li{display:inline-flex;align-items:center;gap:7px;color:var(--ink)}
+.legend small{color:var(--ink3);font-size:12px}
+.band{opacity:.14;stroke:none}
+.cmpnote{color:var(--ink2);font-size:13px;margin:8px 0 0}
+.endl{fill:var(--ink2);font-size:11px}
+.sw{display:inline-block;width:16px;border-top:3px solid transparent;border-radius:2px;vertical-align:middle;margin-left:6px}
+tr.short{display:none}
+body.showshort tr.short,tr.short.sel{display:table-row}
+th:nth-child(2),td:nth-child(2),th:nth-child(3),td:nth-child(3){text-align:left}
+th[data-k]{cursor:pointer;user-select:none}
+th[data-k]:hover,th[data-k]:focus{color:var(--ink);outline:none;text-decoration:underline}
+td small{color:var(--ink3);display:block;font-size:12px}
+td a{color:var(--ink2)}
+.rowv{display:inline-flex;align-items:center;gap:6px}
+details{margin-top:10px}
+summary{cursor:pointer;color:var(--ink2);font-size:13px}
+#tip div{display:flex;align-items:center;gap:7px;margin-top:2px}
+#tip i{display:inline-block;width:14px;border-top:3px solid;border-radius:2px}
+"""
+
+CMP_JS = """
+(function(){
+var D=JSON.parse(document.getElementById('cmp-data').textContent),tip=document.getElementById('tip');
+var R={};D.runs.forEach(function(r){R[r.id]=r});
+var DASH=['','7 4','2 3','9 3 2 3','','7 4','2 3','9 3 2 3'],MAXN=D.max;
+var sel=[],slot={};
+var W=900,H=360,L=48,RM=160,T=12,B=34,PW,PH,NS='http://www.w3.org/2000/svg';
+var svg=document.getElementById('cmp'),meas=document.getElementById('measure'),legend=document.getElementById('legend');
+var note=document.getElementById('cnote'),maxnote=document.getElementById('maxnote'),tb=document.getElementById('runs');
+var dtab=document.getElementById('dtab'),boxes=[].slice.call(tb.querySelectorAll('input.pick'));
+var M={rtt:{key:'p50',unit:'ms',floor:100,cap:1000,limit:D.limits.rtt,ll:'limit for the 95th'},
+ jitter:{key:'jitter',unit:'ms',floor:40,cap:500,limit:D.limits.jitter,ll:'limit'},
+ loss:{key:'loss',unit:'%',floor:5,cap:100,limit:D.limits.loss,ll:'limit'}};
+function el(n,a,txt){var e=document.createElementNS(NS,n);for(var k in a)e.setAttribute(k,a[k]);if(txt!=null)e.textContent=txt;return e}
+function niceCeil(v,f){v=Math.max(v,f);var mag=Math.pow(10,Math.floor(Math.log10(v))),m=[1,2,2.5,5,10];
+ for(var i=0;i<m.length;i++){if(v<=m[i]*mag)return m[i]*mag}return 10*mag}
+function fmtT(s){var m=Math.floor(s/60),x=Math.round(s%60);return m+':'+(x<10?'0':'')+x}
+function stroke(id){return 'var(--s'+(slot[id]+1)+')'}
+function style(id){return 'stroke:'+stroke(id)+(DASH[slot[id]]?';stroke-dasharray:'+DASH[slot[id]]:'')}
+function short(r){return r.tag.length>22?r.tag.slice(0,21)+'\\u2026':r.tag}
+var view={};
+function draw(){
+  var mk=meas.value,m=M[mk],key=m.key,ids=sel.slice(),band=mk==='rtt'&&ids.length<=3;
+  W=Math.max(300,Math.round(svg.getBoundingClientRect().width||900));H=Math.round(Math.max(230,Math.min(360,W*0.42)));
+  RM=(ids.length<=4&&W>=640)?160:14;PW=W-L-RM;PH=H-T-B;
+  svg.setAttribute('viewBox','0 0 '+W+' '+H);
+  while(svg.firstChild)svg.removeChild(svg.firstChild);
+  legend.textContent='';
+  if(!ids.length){svg.appendChild(el('text',{x:W/2,y:H/2,'text-anchor':'middle',class:'ax'},'Tick one or more runs below to draw them.'));
+    note.textContent='';dtab.textContent='';view={};return}
+  var xmax=0,vmax=0;
+  ids.forEach(function(id){var r=R[id];xmax=Math.max(xmax,r.sent);
+    r[key].forEach(function(v){if(v!==null)vmax=Math.max(vmax,v)});
+    if(band)r.p95.forEach(function(v){if(v!==null)vmax=Math.max(vmax,v)})});
+  xmax=Math.max(xmax,10);
+  var ymax=Math.min(niceCeil(vmax*1.1,m.floor),m.cap);
+  var xs=function(t){return L+PW*t/xmax},ys=function(v){return T+PH-PH*Math.min(v,ymax)/ymax};
+  view={xmax:xmax,ymax:ymax,key:key,m:m,band:band};
+  [0,0.5,1].forEach(function(f){var y=T+PH-PH*f;
+    svg.appendChild(el('line',{class:'gl',x1:L,x2:L+PW,y1:y,y2:y}));
+    svg.appendChild(el('text',{class:'ax',x:L-6,y:y+3,'text-anchor':'end'},String(ymax*f)))});
+  var step=60,cand=[10,30,60,120,300,600,1800,3600];
+  for(var q=0;q<cand.length;q++){step=cand[q];if(PW/(xmax/step)>=54)break}
+  for(var t=0;t<=xmax;t+=step){svg.appendChild(el('text',{class:'ax',x:xs(t),y:H-12,'text-anchor':'middle'},
+    t===0?'0':(t%60===0?(t/60)+' min':t+' s')))}
+  if(m.limit<ymax){var yl=ys(m.limit);
+    svg.appendChild(el('line',{class:'thr',x1:L,x2:L+PW,y1:yl,y2:yl}));
+    svg.appendChild(el('text',{class:'thrt',x:L+PW-2,y:yl-3,'text-anchor':'end'},m.limit+' '+m.unit+' '+m.ll))}
+  var ends=[];
+  ids.forEach(function(id){
+    var r=R[id],a=r[key],b=r.p95,segs=[],cur=[];
+    for(var i=0;i<a.length;i++){
+      if(a[i]===null){if(cur.length)segs.push(cur);cur=[]}
+      else cur.push([xs((i+0.5)*r.bin),ys(a[i]),b[i]===null?null:ys(b[i])])}
+    if(cur.length)segs.push(cur);
+    if(band)segs.forEach(function(s){if(s.length<2)return;
+      var up=s.map(function(p){return p[0]+' '+(p[2]===null?p[1]:p[2])}),dn=s.slice().reverse().map(function(p){return p[0]+' '+p[1]});
+      svg.appendChild(el('polygon',{class:'band',points:up.concat(dn).join(' '),style:'fill:'+stroke(id)}))});
+    var d=segs.map(function(s){return 'M'+s[0][0].toFixed(1)+' '+s[0][1].toFixed(1)+(s.length>1?s.slice(1).map(function(p){return ' L'+p[0].toFixed(1)+' '+p[1].toFixed(1)}).join(''):' l0.01 0')}).join(' ');
+    svg.appendChild(el('path',{class:'ln',d:d,style:style(id)}));
+    for(var j=0;j<r.p50.length;j++){if(r.p50[j]===null){var x=xs((j+0.5)*r.bin);
+      svg.appendChild(el('line',{class:'lostt',x1:x,x2:x,y1:T+PH+4,y2:T+PH+12}))}}
+    if(segs.length){var last=segs[segs.length-1],p=last[last.length-1];ends.push({id:id,x:p[0],y:p[1]})}
+    var li=document.createElement('li'),sw=el('svg',{width:26,height:10,viewBox:'0 0 26 10','aria-hidden':'true'});
+    sw.appendChild(el('line',{x1:1,x2:25,y1:5,y2:5,class:'ln',style:style(id)}));li.appendChild(sw);
+    var lab=document.createElement('span');lab.textContent=r.label;li.appendChild(lab);
+    var sm=document.createElement('small');sm.textContent=r.verdict||'';li.appendChild(sm);legend.appendChild(li)});
+  if(RM>100){
+    ends.sort(function(p,q){return p.y-q.y});
+    for(var k=1;k<ends.length;k++){if(ends[k].y-ends[k-1].y<13)ends[k].y=ends[k-1].y+13}
+    ends.forEach(function(e){var x0=L+PW+6;
+      svg.appendChild(el('line',{class:'ln',x1:x0,x2:x0+12,y1:e.y,y2:e.y,style:style(e.id)}));
+      svg.appendChild(el('text',{class:'endl',x:x0+16,y:e.y+4},short(R[e.id])))})}
+  svg.appendChild(el('line',{class:'cross',x1:0,x2:0,y1:T,y2:T+PH,id:'xh'}));
+  svg.appendChild(el('rect',{x:L,y:T,width:PW,height:PH+16,fill:'transparent',id:'hit'}));
+  var tg={},shorts=false;ids.forEach(function(id){tg[R[id].tg]=1;if(R[id].short)shorts=true});
+  var msg=[];
+  if(Object.keys(tg).length>1)msg.push('These runs did not test the same targets (or not all had the UDP stream), so part of a difference may be the test and not the place.');
+  if(shorts)msg.push('Runs under 5 minutes are noisy: a few lost pings move the lines a lot.');
+  note.textContent=msg.join(' ');
+  drawTable(ids,key,m)}
+function drawTable(ids,key,m){
+  dtab.textContent='';var t=document.createElement('table'),h=t.insertRow(),th=document.createElement('th');
+  th.textContent='Minute';h.appendChild(th);
+  ids.forEach(function(id){var c=document.createElement('th');c.textContent=R[id].tag;h.appendChild(c)});
+  var n=0;ids.forEach(function(id){n=Math.max(n,R[id][key].length)});
+  for(var i=0;i<n;i++){var row=t.insertRow(),c0=row.insertCell();
+    c0.textContent=fmtT(i*R[ids[0]].bin);
+    ids.forEach(function(id){var c=row.insertCell(),v=R[id][key][i];c.textContent=v===undefined?'':(v===null?(key==='loss'?'no data':'lost'):v+' '+m.unit)})}
+  dtab.appendChild(t)}
+function tipAt(ev){
+  if(!view.xmax)return;
+  var r0=svg.getBoundingClientRect(),x=(ev.clientX-r0.left)*(W/r0.width),t=(x-L)/PW*view.xmax;
+  t=Math.max(0,Math.min(view.xmax,t));var px=L+PW*t/view.xmax,xh=document.getElementById('xh');
+  xh.setAttribute('x1',px);xh.setAttribute('x2',px);xh.style.display='block';
+  tip.textContent='';var b=document.createElement('b');b.textContent='at '+fmtT(t);tip.appendChild(b);
+  sel.forEach(function(id){var r=R[id],i=Math.floor(t/r.bin),row=document.createElement('div'),sw=document.createElement('i');
+    sw.style.borderColor=stroke(id);row.appendChild(sw);var s=document.createElement('span'),v=r[view.key][i],txt;
+    if(t>r.sent||v===undefined)txt='run ended';
+    else if(v===null)txt=view.key==='loss'?'no data':'lost';
+    else{txt=v+' '+view.m.unit;if(meas.value==='rtt'&&r.p95[i]!==null)txt+=' (95th '+r.p95[i]+')'}
+    s.textContent=r.tag+': '+txt;row.appendChild(s);tip.appendChild(row)});
+  tip.style.display='block';
+  tip.style.left=Math.min(ev.clientX+14,window.innerWidth-tip.offsetWidth-8)+'px';
+  tip.style.top=Math.max(ev.clientY-tip.offsetHeight-12,6)+'px'}
+svg.addEventListener('pointermove',tipAt);svg.addEventListener('pointerdown',tipAt);
+svg.addEventListener('pointerleave',function(){var xh=document.getElementById('xh');if(xh)xh.style.display='none';tip.style.display='none'});
+function setSel(id,on){
+  if(on){if(sel.indexOf(id)>=0)return;if(sel.length>=MAXN)return;
+    var used={};sel.forEach(function(i){used[slot[i]]=1});var s=0;while(used[s])s++;slot[id]=s;sel.push(id)}
+  else{sel=sel.filter(function(i){return i!==id});delete slot[id]}}
+function sync(){
+  boxes.forEach(function(b){var id=b.dataset.id,on=sel.indexOf(id)>=0,tr=b.closest('tr'),sw=tr.querySelector('.sw');
+    b.checked=on;b.disabled=!on&&sel.length>=MAXN;tr.classList.toggle('sel',on);
+    sw.style.borderTopColor=on?stroke(id):'transparent';sw.style.borderTopStyle=on&&DASH[slot[id]]?'dashed':'solid'});
+  maxnote.hidden=sel.length<MAXN}
+tb.addEventListener('change',function(ev){var b=ev.target;if(!b.classList.contains('pick'))return;
+  setSel(b.dataset.id,b.checked);sync();draw()});
+meas.addEventListener('change',draw);
+document.getElementById('showshort').addEventListener('change',function(ev){document.body.classList.toggle('showshort',ev.target.checked)});
+[].forEach.call(document.querySelectorAll('th[data-k]'),function(th){
+  function go(){var k=th.dataset.k,asc=th.dataset.dir!=='asc';th.dataset.dir=asc?'asc':'desc';
+    var rows=[].slice.call(tb.rows);
+    rows.sort(function(a,b){var x=a.dataset[k]||'',y=b.dataset[k]||'',nx=parseFloat(x),ny=parseFloat(y);
+      var c=(isNaN(nx)||isNaN(ny))?x.localeCompare(y):nx-ny;return asc?c:-c});
+    rows.forEach(function(r){tb.appendChild(r)})}
+  th.addEventListener('click',go);th.addEventListener('keydown',function(ev){if(ev.key==='Enter'||ev.key===' '){ev.preventDefault();go()}})});
+D.init.forEach(function(id){setSel(id,true)});sync();draw();
+var rz=null;window.addEventListener('resize',function(){if(rz)cancelAnimationFrame(rz);rz=requestAnimationFrame(draw)});
+})();
+"""
+
+
+def when_label(ts):
+    d = datetime.datetime.fromtimestamp(ts)
+    return "%s %s %d, %d:%02d %s" % (d.strftime("%a"), d.strftime("%b"), d.day, d.hour % 12 or 12, d.minute, "am" if d.hour < 12 else "pm")
+
+
+def length_label(sent):
+    return ("%g min" % round(sent / 60.0, 1)) if sent >= 60 else ("%d s" % sent)
+
+
+def render_compare(recs):
+    """One self-contained page: every saved run as a line on one graph (x = time into the run), a table of the runs
+    with tick boxes, and the same numbers as a table under the graph."""
+    out = ['<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">',
+           "<title>Compare network runs</title><style>", CSS % {
+               "light": ";".join("--s%d:%s" % (i + 1, c) for i, c in enumerate(SLOTS_LIGHT)),
+               "dark": ";".join("--s%d:%s" % (i + 1, c) for i, c in enumerate(SLOTS_DARK))}, CMP_CSS,
+           "</style></head><body><main>", "<h1>Compare network runs</h1>"]
+    if not recs:
+        out.append('<div class="sub">No runs saved yet. Run <code>./tv nettest</code> first.</div></main></body></html>')
+        return "".join(out)
+    full = [r for r in recs if not r.get("short")]
+    shown = (full or recs)[-MAX_COMPARE:]
+    data = {"max": MAX_COMPARE, "limits": {"rtt": GOOD["rtt"], "jitter": GOOD["jitter"], "loss": GOOD["loss"]},
+            "init": [r["id"] for r in shown], "runs": []}
+    for r in recs:
+        place = r.get("place") or "Unknown place"
+        when = when_label(r["started"])
+        bins = r.get("bins") or {}
+        data["runs"].append({
+            "id": r["id"], "label": "%s, %s%s" % (place, when, " (%s)" % length_label(r.get("sent") or 0) if r.get("short") else ""),
+            "tag": "%s %s" % (place, when.split(", ")[-1]), "sent": r.get("sent") or 0, "bin": r.get("bin_s") or BIN_S,
+            "p50": bins.get("p50", []), "p95": bins.get("p95", []), "jitter": bins.get("jitter", []), "loss": bins.get("loss", []),
+            "verdict": (r.get("verdict") or "").title(), "short": bool(r.get("short")),
+            "tg": ",".join(r.get("targets") or []) + ("+udp" if r.get("udp") else "")})
+    nfull = len(full)
+    out.append('<div class="sub">%d run%s saved%s. Each line is one run; the x axis is time since that run started.</div>'
+               % (len(recs), "" if len(recs) == 1 else "s", (", %d of them full length" % nfull) if nfull != len(recs) else ""))
+    out.append('<div class="card" style="margin-top:14px"><div class="ctl"><label>Show <select id="measure">'
+               '<option value="rtt">Round trip time</option><option value="jitter">Jitter</option><option value="loss">Packets lost</option></select></label>'
+               '<span class="sub" id="maxnote" hidden>Up to %d runs at once. Untick one to add another.</span></div>' % MAX_COMPARE)
+    out.append('<svg class="plot" id="cmp" viewBox="0 0 900 360" role="img" aria-label="Selected runs on one graph"></svg>'
+               '<ul class="legend" id="legend"></ul><p class="cmpnote" id="cnote"></p>'
+               '<details><summary>Show this graph as a table</summary><div class="scroll" id="dtab"></div></details></div>')
+    out.append("<h2>Runs</h2>")
+    out.append('<div class="ctl"><label><input type="checkbox" id="showshort"> Show short runs (under %d min)</label></div>' % (SHORT_S // 60))
+    out.append('<div class="card scroll"><table><thead><tr><th></th><th data-k="when" tabindex="0">When</th><th data-k="where" tabindex="0">Where</th>'
+               '<th>Length</th><th>Verdict</th><th data-k="mos" tabindex="0">Score</th><th>Avg ms</th><th data-k="p95" tabindex="0">95th ms</th>'
+               '<th data-k="jit" tabindex="0">Jitter ms</th><th data-k="loss" tabindex="0">Loss %</th><th>Longest dropout</th><th>Tests</th></tr></thead><tbody id="runs">')
+    for r in reversed(recs):
+        rank = r.get("rank")
+        verdict = (r.get("verdict") or "-").title()
+        place = r.get("place")
+        where = esc(place or "unknown")
+        if r.get("lat") is not None and r.get("lon") is not None:
+            where += ('<small>%.4f, %.4f%s · <a href="https://www.openstreetmap.org/?mlat=%.5f&amp;mlon=%.5f#map=13/%.5f/%.5f" target="_blank" '
+                      'rel="noopener noreferrer">map</a></small>' % (r["lat"], r["lon"], (" ±%d m" % r["accuracy_m"]) if r.get("accuracy_m") is not None else "",
+                                                                      r["lat"], r["lon"], r["lat"], r["lon"]))
+        out.append('<tr class="%s" data-id="%s" data-when="%s" data-where="%s" data-mos="%s" data-p95="%s" data-jit="%s" data-loss="%s">'
+                   % ("short" if r.get("short") else "", esc(r["id"]), r["started"], esc(place or ""), r.get("mos") if r.get("mos") is not None else "",
+                      r.get("rtt_p95") if r.get("rtt_p95") is not None else "", r.get("jitter_ms") if r.get("jitter_ms") is not None else "",
+                      r.get("loss_pct") if r.get("loss_pct") is not None else ""))
+        out.append('<td><input type="checkbox" class="pick" data-id="%s" aria-label="Show this run on the graph"><span class="sw"></span></td>' % esc(r["id"]))
+        out.append("<td>%s</td><td>%s</td><td>%s%s</td>" % (esc(when_label(r["started"])), where, esc(length_label(r.get("sent") or 0)),
+                                                              " (stopped early)" if r.get("partial") else ""))
+        out.append('<td><span class="rowv">%s%s</span></td>' % (icon(rank).replace('width="20" height="20"', 'width="14" height="14"') if rank in (0, 1, 2) else "", esc(verdict)))
+        out.append("<td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>" % (
+            "-" if r.get("mos") is None else "%.2f" % r["mos"], fmt(r.get("rtt_avg"), "", 0), fmt(r.get("rtt_p95"), "", 0),
+            fmt(r.get("jitter_ms"), "", 1), fmt(r.get("loss_pct"), "", 2), "-" if r.get("longest_lost") is None else "%d s" % r["longest_lost"],
+            esc("%s of %s targets%s" % (r.get("usable", "-"), r.get("of", "-"), " + UDP" if r.get("udp") else ""))))
+    out.append("</tbody></table></div>")
+    out.append('<p class="foot">Round trip, jitter and loss here come from the ping and TCP probes of every target together, in %d second steps; '
+               "the verdict and score are from the full run. Different times of day on the same link differ as much as different places do, "
+               "so the time is part of every label.</p>" % BIN_S)
+    out.append('<div id="tip"></div>')
+    out.append('<script type="application/json" id="cmp-data">%s</script>' % json.dumps(data, separators=(",", ":")).replace("<", "\\u003c"))
+    out.append("<script>%s</script></main></body></html>" % CMP_JS)
+    return "".join(out)
+
+
+def write_compare(out_path=None):
+    sync_history()
+    recs = read_history()
+    path = Path(out_path) if out_path else RUN_DIR / "compare.html"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(render_compare(recs))
+    return path, len(recs)
+
+
+def print_history(say=print):
+    recs = read_history()
+    if not recs:
+        say("No runs saved yet.")
+        return
+    say("%-19s %-22s %-8s %6s %6s %6s %6s %8s" % ("when", "where", "verdict", "score", "95th", "jit", "loss", "length"))
+    for r in recs:
+        say("%-19s %-22s %-8s %6s %6s %6s %6s %8s" % (
+            datetime.datetime.fromtimestamp(r["started"]).strftime("%Y-%m-%d %H:%M"), (r.get("place") or "unknown")[:22],
+            (r.get("verdict") or "-").title(), "-" if r.get("mos") is None else "%.2f" % r["mos"], fmt(r.get("rtt_p95"), "", 0),
+            fmt(r.get("jitter_ms"), "", 1), fmt(r.get("loss_pct"), "", 2), length_label(r.get("sent") or 0) + (" *" if r.get("short") else "")))
+    say("(* = short run, hidden in the compare page by default)")
+
+
 def latest_dir():
     try:
         dirs = sorted(d for d in RUN_DIR.iterdir() if d.is_dir() and (d / "result.json").exists())
@@ -1071,7 +1471,7 @@ def latest_dir():
 # ====================================================================================================
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
-    if not argv or argv[0] not in ("run", "report", "latest", "-h", "--help"):
+    if not argv or argv[0] not in ("run", "report", "latest", "compare", "history", "-h", "--help"):
         argv.insert(0, "run")
     ap = argparse.ArgumentParser(description="Network health test for video calls")
     sub = ap.add_subparsers(dest="cmd")
@@ -1086,6 +1486,9 @@ def main(argv=None):
     rp = sub.add_parser("report", help="re-render report.html from a saved result")
     rp.add_argument("dir", nargs="?")
     sub.add_parser("latest", help="print the latest run folder")
+    cp = sub.add_parser("compare", help="write compare.html: every saved run on one graph")
+    cp.add_argument("--out", help="where to write it (default: next to the runs)")
+    sub.add_parser("history", help="list the saved runs")
     args = ap.parse_args(argv)
     if args.cmd == "report":
         d = Path(args.dir) if args.dir else latest_dir()
@@ -1093,6 +1496,14 @@ def main(argv=None):
             print("No result found.")
             return 2
         print(write_report(d))
+        return 0
+    if args.cmd == "compare":
+        path, n = write_compare(args.out)
+        print("%s  (%d run%s)" % (path, n, "" if n == 1 else "s"))
+        return 0 if n else 2
+    if args.cmd == "history":
+        sync_history()
+        print_history()
         return 0
     if args.cmd == "latest":
         d = latest_dir()

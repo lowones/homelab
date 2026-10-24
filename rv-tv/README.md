@@ -100,6 +100,19 @@ report, `latest` prints the newest folder, `--duration 60` shortens the test, Ct
 - How the verdict is decided is printed at the bottom of every report. Thresholds are constants at the top of
   `nettest.py` (`GOOD`, `MARGINAL`, `OUTAGE_*`). When most targets drop the same second, the report blames the
   link (dish, Wi-Fi); when only one does, it blames that path.
+- **Place and time log:** every run records when it ran and where, from the mini's own location fix (the same
+  `.run/location.raw` the phone menu uses; only used if under 6 hours old, otherwise the run is logged with no
+  place and says so). `result.json` has `place` and `geo` (lat, lon to 4 places, accuracy in m). One line per run
+  also goes to `.run/nettest/history.jsonl` (verdict, score, numbers, and the run as 10-second points), and older
+  runs are added the first time it syncs. `python3 nettest.py history` lists them.
+- **Compare runs:** `python3 nettest.py compare` writes `.run/nettest/compare.html` (`--out FILE` to put it
+  elsewhere). One line per run on one graph, x = time since that run started, y = round trip (median, with the
+  95th as a band when three or fewer runs are drawn), jitter or packets lost. Tick runs in the table to add them
+  (up to 8, one colour each), click headings to sort, "Show short runs" lists runs under 5 minutes (hidden and not
+  drawn by default; the 60 s test run is one). It warns when the drawn runs did not test the same targets, since
+  that makes a difference look like a place effect. Each row has a map link from its coordinates.
+- A target is only called weaker than the rest when at least 3 pings were lost (`MIN_LOST`); 1 lost ping in 60 is
+  1.7 % but is not evidence of a bad path.
 - Checks: `python3 tests/test_nettest.py` (about 40 s; uses stand-in `tests/fakeping.py` and `fakeiperf.py`, and a
   real iperf3 over loopback when one is installed; the fixtures in `tests/fixtures/` are real iperf3 3.22 output).
 
