@@ -86,6 +86,7 @@ ITIN_SOURCES = [x.strip() for x in os.environ.get("TV_ITINERARY", "").split(",")
 # holds reminders, and a note typed into the sheet should show up on the TV within minutes.
 ITIN_REFRESH = max(60, int(os.environ.get("TV_ITINERARY_REFRESH", "900")))
 REMINDER_COL = 6             # column G (0-based) of today's row is the reminder
+CITY_COL, CAMP_COL, TERMS_COL = 3, 4, 7   # columns D (city), E (campground), H (terms confirmation) of a dated row
 INFO_COL = 11                # column L (INFO): any text there also puts today's row on the reminder card
 REMINDER_MAX = 300           # characters kept; the dashboard shows about three lines
 
@@ -668,7 +669,7 @@ def save_state(**changes):
     return cur
 
 
-_itin = {"rows": {}, "next": {}, "stops": {}, "reminders": {}, "infos": {}, "error": None}   # per source: parsed rows, when to refetch
+_itin = {"rows": {}, "next": {}, "stops": {}, "reminders": {}, "infos": {}, "details": {}, "error": None}   # per source: parsed rows, when to refetch
 _geo = {}                                            # city -> (lat, lon, label)
 DATE_RE = re.compile(r"^\s*(\d{1,2})/(\d{1,2})/(\d{4})\s*$")
 # a reminder cell that is nothing but a date: m/d/yyyy, m/d/yy or yyyy-mm-dd
@@ -712,11 +713,27 @@ def parse_infos(text):
     return _column_notes(text, INFO_COL)
 
 
-def note_is_past_date(note, today):
-    """True only when the whole cell is a date (m/d/yyyy, m/d/yy or yyyy-mm-dd) before `today`.
-    The sheet's reminders point at the day a reservation was made; once that day is behind us the
-    reminder is done. Anything else in the cell (text, a date plus text, a bare m/d with no year,
-    an impossible date) is not treated as a date, so it still shows."""
+def parse_details(text):
+    """CSV text -> {date: {"city", "camp", "confirmed"}} from columns D, E and H of every dated row.
+    `confirmed` is True when H has any text. Two rows with the same date are merged (first city and
+    campground that are not empty win, any H text confirms)."""
+    out = {}
+    for r in csv.reader(io.StringIO(text)):
+        m = DATE_RE.match(r[1]) if len(r) > 1 else None
+        if not m:
+            continue
+        def cell(i):
+            return " ".join(r[i].split()) if len(r) > i else ""
+        d = datetime.date(int(m[3]), int(m[1]), int(m[2]))
+        cur = out.setdefault(d, {"city": "", "camp": "", "confirmed": False})
+        cur["city"] = cur["city"] or cell(CITY_COL)
+        cur["camp"] = cur["camp"] or cell(CAMP_COL)
+        cur["confirmed"] = cur["confirmed"] or bool(cell(TERMS_COL))
+    return out
+
+
+def note_date(note):
+    """The date when the whole cell is one date (m/d/yyyy, m/d/yy or yyyy-mm-dd), else None."""
     note = note.strip()
     for i, rx in enumerate(NOTE_DATE_RES):
         m = rx.match(note)
@@ -725,10 +742,19 @@ def note_is_past_date(note, today):
         a, b, c = (int(x) for x in m.groups())
         y, mo, d = (a, b, c) if i == 2 else (c + 2000 if i == 1 else c, a, b)
         try:
-            return datetime.date(y, mo, d) < today
+            return datetime.date(y, mo, d)
         except ValueError:
-            return False
-    return False
+            return None
+    return None
+
+
+def note_is_past_date(note, today):
+    """True only when the whole cell is a date (m/d/yyyy, m/d/yy or yyyy-mm-dd) before `today`.
+    The sheet's reminders point at the day a reservation was made; once that day is behind us the
+    reminder is done. Anything else in the cell (text, a date plus text, a bare m/d with no year,
+    an impossible date) is not treated as a date, so it still shows."""
+    d = note_date(note)
+    return d is not None and d < today
 
 
 def read_source(src):
@@ -754,6 +780,7 @@ def itinerary_city(today):
                 _itin["stops"][src] = parse_stops(text)
                 _itin["reminders"][src] = parse_reminders(text)
                 _itin["infos"][src] = parse_infos(text)
+                _itin["details"][src] = parse_details(text)
                 _itin["next"][src] = now + ITIN_REFRESH
                 _itin["error"] = None
             except Exception as e:
@@ -785,12 +812,33 @@ def sheet_target(today):
     return SHEET_URL
 
 
+def place_for(d):
+    """The sheet row for date `d` (looked up in every trip tab; the date carries its year, so only the
+    tab for that year has it): {"city", "camp", "confirmed"} or None when no tab has a row with a city."""
+    found = None
+    for det in _itin.get("details", {}).values():
+        row = det.get(d)
+        if not row:
+            continue
+        if found is None:
+            found = dict(row)
+        else:
+            found["city"] = found["city"] or row["city"]
+            found["camp"] = found["camp"] or row["camp"]
+            found["confirmed"] = found["confirmed"] or row["confirmed"]
+    return found if found and found["city"] else None
+
+
 def reminder_today(today):
     """Blocking. What today's row puts on the reminder card, or None. Two things can fire it:
     column G (REMINDER), unless the cell is just a date that is already past, and column L (INFO),
     whenever it has any text. G comes first, INFO on a second line. The same text on two tabs shows
     once; different text on two tabs is joined with " / ". If a refresh fails the last good copy of
-    the sheet keeps being used."""
+    the sheet keeps being used.
+    A G cell that is only a date is looked up in the trip tab for its year: when that row has a city
+    (column D), the card shows the city (and under it, smaller, the date and the campground from column E),
+    tone "ok" (green) if column H has text, "bad" (red) if not. Without such a row the date shows as
+    plain text. `lines` is in the result only when a place is shown."""
     itinerary_city(today)                       # refreshes the cached sources
     g_parts, i_parts = [], []
     for src in ITIN_SOURCES:
@@ -800,13 +848,31 @@ def reminder_today(today):
         info = _itin["infos"].get(src, {}).get(today)
         if info and info not in i_parts:
             i_parts.append(info)
-    lines = [" / ".join(p) for p in (g_parts, i_parts) if p]
+    plain, places = [], []
+    for note in g_parts:
+        d = note_date(note)
+        pl = place_for(d) if d else None
+        if pl:
+            places.append((note, pl))
+        else:
+            plain.append(note)
+    lines = []
+    if plain:
+        lines.append({"t": " / ".join(plain)})
+    for note, pl in places:
+        lines.append({"t": pl["city"], "sub": " \u00b7 ".join(x for x in (note, pl["camp"]) if x),
+                      "tone": "ok" if pl["confirmed"] else "bad", "flat": f"{note} \u00b7 {pl['city']}" + (f" \u00b7 {pl['camp']}" if pl["camp"] else "")})
+    if i_parts:
+        lines.append({"t": " / ".join(i_parts)})
     if not lines:
         return None
-    text = "\n".join(lines)
+    text = "\n".join(ln.get("flat") or ln["t"] for ln in lines)
     if len(text) > REMINDER_MAX:
         text = text[:REMINDER_MAX - 1].rstrip() + "\u2026"
-    return {"text": text, "date": today.isoformat()}
+    out = {"text": text, "date": today.isoformat()}
+    if places:
+        out["lines"] = [{k: (v[:120] if isinstance(v, str) else v) for k, v in ln.items() if v and k != "flat"} for ln in lines]
+    return out
 
 
 async def get_reminder():

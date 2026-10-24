@@ -33,9 +33,20 @@ export default {
     if (SOURCES[here.source]) add(main, 'div', 'loc-src', SOURCES[here.source]);
     // Column G of today's row on the trip sheet (data.reminder): top right, opposite the place.
     if (rem) {
-      const card = add(head, 'div', 'loc-reminder');
+      const card = add(head, 'div', 'loc-reminder' + (rem.lines ? ' has-places' : ''));
       add(card, 'span', 'tag', 'Reminder');
-      add(card, 'div', 'txt', rem.text);             // textContent only: it comes from a spreadsheet
+      const txt = add(card, 'div', 'txt');
+      if (rem.lines) {
+        // A date looked up in its year's tab: green when column H has text, red when it does not.
+        // The mark keeps the meaning when the two colors look alike. textContent only.
+        for (const ln of rem.lines) {
+          const row = add(txt, 'div', 'rline' + (ln.tone ? ' ' + ln.tone : ''),
+                          (ln.tone === 'ok' ? '\u2713 ' : ln.tone === 'bad' ? '! ' : '') + ln.t);
+          if (ln.sub) add(row, 'div', 'rsub', ln.sub);
+        }
+      } else {
+        txt.textContent = rem.text;                  // textContent only: it comes from a spreadsheet
+      }
     }
 
     const t = nav && nav.target;

@@ -158,6 +158,71 @@ check("combined text is cut to the limit and keeps the first line", len(t) == tv
 put(g="6/25/2026", l="Dentist", src="fake-a", d=today + datetime.timedelta(days=1))
 check("only today's row counts for G and INFO", tv.reminder_today(today) is None)
 
+# ---- reminder: a date in column G is looked up in its year's tab (city D, campground E, terms H) --
+check("city, campground and terms columns are D, E and H", (tv.CITY_COL, tv.CAMP_COL, tv.TERMS_COL) == (3, 4, 7))
+t26 = ("W,DATE,DAY,CITY,CAMP,DIST,REMINDER,TERMS\n"
+       "1,11/3/2026,Tue,\"Bandon, OR\",Bullards Beach,0,,Confirmed 9/1\n"      # city + H -> green
+       "1,11/4/2026,Wed,\"Newport, OR\",South Beach,0,,\n"                      # city, no H -> red
+       "1,11/5/2026,Thu,,,0,,\n"                                                 # blank city: no lookup
+       "1,11/6/2026,Fri,Astoria,,0,,x\n"                                         # no campground
+       "1,11/7/2026,Sat,Gold Beach\n")                                           # short row
+t27 = ("W,DATE,DAY,CITY,CAMP,DIST,REMINDER,TERMS\n"
+       "1,2/24/2027,Wed,\"Yuma, AZ\",Hacienda RV,0,,\n"
+       "1,2/24/2027,Wed,,,0,,ok\n")                                              # same date twice: merged
+d = tv.parse_details(t26)
+check("parse_details reads D, E, H of dated rows", d[D(2026, 11, 3)] == {"city": "Bandon, OR", "camp": "Bullards Beach", "confirmed": True}, d)
+check("empty H is not confirmed", d[D(2026, 11, 4)]["confirmed"] is False)
+check("short rows do not break the parse", d[D(2026, 11, 7)] == {"city": "Gold Beach", "camp": "", "confirmed": False}, d)
+d27 = tv.parse_details(t27)
+check("two rows with one date are merged", d27[D(2027, 2, 24)] == {"city": "Yuma, AZ", "camp": "Hacienda RV", "confirmed": True}, d27)
+check("note_date reads a whole-cell date only", tv.note_date("11/3/2026") == D(2026, 11, 3)
+      and tv.note_date("2026-11-03") == D(2026, 11, 3) and tv.note_date("11/3") is None
+      and tv.note_date("call 11/3/2026") is None and tv.note_date("2/30/2026") is None)
+
+tv._itin["details"] = {"fake-a": d, "fake-b": d27}
+tv._itin["infos"] = {}
+tv._itin["reminders"] = {}
+put(g="11/3/2026")
+r = tv.reminder_today(today)
+check("date with city and H text: green line", r["lines"] == [{"t": "Bandon, OR", "sub": "11/3/2026 \u00b7 Bullards Beach", "tone": "ok"}], r)
+check("flat text still has the same facts", r["text"] == "11/3/2026 \u00b7 Bandon, OR \u00b7 Bullards Beach", r["text"])
+put(g="11/4/2026")
+check("date with city and no H text: red line", tv.reminder_today(today)["lines"][0]["tone"] == "bad")
+put(g="11/6/2026")
+ln = tv.reminder_today(today)["lines"][0]
+check("no campground: the sub line is just the date", ln == {"t": "Astoria", "sub": "11/6/2026", "tone": "ok"}, ln)
+put(g="11/5/2026")
+r = tv.reminder_today(today)
+check("row without a city: plain date, no lines", r["text"] == "11/5/2026" and "lines" not in r, r)
+put(g="12/25/2026")
+r = tv.reminder_today(today)
+check("date with no row in any tab: plain date", r["text"] == "12/25/2026" and "lines" not in r, r)
+put(g="2/24/2027")
+r = tv.reminder_today(today)
+check("a 2027 date is found in the 2027 tab", r["lines"][0]["t"] == "Yuma, AZ" and r["lines"][0]["sub"] == "2/24/2027 \u00b7 Hacienda RV" and r["lines"][0]["tone"] == "ok", r)
+tv._itin["details"] = {"fake-a": d}
+r = tv.reminder_today(today)
+check("2027 tab not loaded: the date shows plain", r["text"] == "2/24/2027" and "lines" not in r, r)
+tv._itin["details"] = {"fake-a": d, "fake-b": d27}
+put(g="6/25/2026")
+tv._itin["details"] = {"fake-a": {D(2026, 6, 25): {"city": "Seaside, OR", "camp": "", "confirmed": True}}}
+check("a past date stays hidden even when its row has a city", tv.reminder_today(today) is None)
+tv._itin["details"] = {"fake-a": d}
+put(g="Book Bandon", l="Dentist at 9")
+r = tv.reminder_today(today)
+check("text reminders are unchanged (no lines)", r["text"] == "Book Bandon\nDentist at 9" and "lines" not in r, r)
+put(g="11/3/2026", l="Dentist at 9")
+r = tv.reminder_today(today)
+check("place line then INFO line", [x["t"] for x in r["lines"]] == ["Bandon, OR", "Dentist at 9"]
+      and "tone" not in r["lines"][1], r)
+tv._itin["reminders"] = {"fake-a": {today: "11/3/2026"}, "fake-b": {today: "11/3/2026"}}
+tv._itin["infos"] = {}
+check("the same date on two tabs shows once", len(tv.reminder_today(today)["lines"]) == 1)
+tv._itin["reminders"] = {"fake-a": {today: "Book"}, "fake-b": {today: "11/4/2026"}}
+r = tv.reminder_today(today)
+check("plain note and place on different tabs: plain first, then place", [x["t"] for x in r["lines"]] ==
+      ["Book", "Newport, OR"] and r["lines"][1]["tone"] == "bad", r)
+
 shutil.rmtree(TMP, ignore_errors=True)
 print("\nSOME FAILED" if fails else "\nALL OK")
 sys.exit(1 if fails else 0)

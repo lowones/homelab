@@ -45,7 +45,12 @@ browser window on the Mac pointed at `/display`. `POST /display/close` closes it
   cell is only a date that is already past (`m/d/yyyy`, `m/d/yy` or `yyyy-mm-dd`; the year must be in
   the cell, so format the column to show it). Anything else in the cell shows: text, a date plus text,
   a bare `6/25`. **Column L (INFO):** any text there shows too, even when G is a past date. When both
-  fire, G is the first line and INFO the second. Only today's row counts, so a reminder is written on
+  fire, G is the first line and INFO the second. **A date in G is looked up:** the row for that date in
+  the trip tab for its year (the 2027 tab must be in `TV_ITINERARY`) is read, and if its city (column D)
+  has text the card shows the city, with the date and the campground (column E) under it, in green when
+  column H (terms confirmation) has any text and red when it does not (a check mark or `!` is added so
+  the two do not rely on color). No row or no city: the date shows as plain text. Past dates stay hidden.
+  Only today's row counts, so a reminder is written on
   the day it should appear. When the sheet cannot be fetched the last good copy keeps being used.
   Adding the next year's tab to `TV_ITINERARY` covers it.
 - **Moon phase** at the right of the weather row (name, icon, percent lit). Worked out on the server

@@ -89,6 +89,13 @@ body {
   background: #e5322d; color: #fff; font-size: .95rem; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; }
 .loc-reminder .txt { font-size: 1.15rem; line-height: 1.2; overflow: hidden; overflow-wrap: anywhere; white-space: pre-line;   /* pre-line: the INFO text sits on its own line */
   display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; }
+/* a date looked up in its year's tab: dark card, text green (terms confirmed) or red (not) */
+.loc-reminder.has-places { border-color: rgba(255, 255, 255, .28); background: rgba(255, 255, 255, .07); }
+.loc-reminder.has-places .txt { -webkit-line-clamp: 4; }
+.loc-reminder.has-places .tag { background: #4a5663; }
+.loc-reminder .rline.ok { color: #5fe28f; }
+.loc-reminder .rline.bad { color: #ff6b63; }
+.loc-reminder .rsub { font-size: .85em; opacity: .9; }
 .loc-badge { display: inline-block; font-size: 1.15rem; font-weight: 700; letter-spacing: .12em;
   padding: .15rem .7rem; margin-bottom: .3rem; border-radius: .35rem; background: var(--signal); color: #1a1205; }
 .loc-label { font-size: 3rem; line-height: 1.05; font-weight: 600; letter-spacing: -.01em; overflow-wrap: anywhere; }
