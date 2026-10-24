@@ -57,6 +57,16 @@ resource "proxmox_virtual_environment_vm" "vault" {
 
   agent { enabled = true }
 
+  # as the VM already is on grid (no ostype line, serial0 as the console); without these
+  # Terraform plans to delete serial0 while vga is still serial0
+  operating_system {
+    type = "other"
+  }
+
+  serial_device {
+    device = "socket"
+  }
+
   cpu {
     cores = 2
     type  = "host"
