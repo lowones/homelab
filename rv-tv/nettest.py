@@ -6,6 +6,7 @@
     python3 nettest.py report [DIR]    re-render report.html from a saved result (default: latest)
     python3 nettest.py latest          print the folder of the latest run
     python3 nettest.py history         list every saved run (place, time, numbers)
+    python3 nettest.py rescore         judge saved runs again under the current scoring rules
     python3 nettest.py compare         write compare.html: all saved runs on one graph, to compare places and times
 
 What it does for the whole test, all at once:
@@ -135,9 +136,11 @@ def percentile(sorted_vals, p):
 
 
 def rtt_jitter(series):
-    """Mean absolute difference between neighbouring replies (neighbours = consecutive seconds)."""
-    diffs = [abs(b - a) for a, b in zip(series, series[1:]) if a is not None and b is not None]
-    return sum(diffs) / len(diffs) if diffs else 0.0
+    """Typical change between neighbouring replies (neighbours = consecutive seconds): the median of the absolute
+    differences, so one stalled second does not count as a jittery link. Its size is the 95th percentile and
+    the dropouts, which are reported separately."""
+    diffs = sorted(abs(b - a) for a, b in zip(series, series[1:]) if a is not None and b is not None)
+    return percentile(diffs, 50) if diffs else 0.0
 
 
 def lost_runs(series):
@@ -173,8 +176,9 @@ def level(value, good, marginal, higher_is_better=False):
     return 0 if value <= good else 1 if value <= marginal else 2
 
 
-def verdict_for(loss, jitter, rtt_p95, mos, longest_lost):
-    """-> (rank 0..2, [reasons]). Reasons name every number that cost a level."""
+def verdict_for(loss, jitter, rtt_p95, mos, longest_lost, jitter_trusted=True):
+    """-> (rank 0..2, [reasons]). Reasons name every number that cost a level. Jitter that only comes from ping
+    or TCP timing once a second (jitter_trusted False) can cost one level but never two."""
     checks = [
         ("loss", loss, "%.1f%% packet loss" % (loss or 0)),
         ("jitter", jitter, "%.0f ms jitter" % (jitter or 0)),
@@ -183,6 +187,8 @@ def verdict_for(loss, jitter, rtt_p95, mos, longest_lost):
     rank, reasons = 0, []
     for key, val, text in checks:
         lv = level(val, GOOD[key], MARGINAL[key])
+        if key == "jitter" and not jitter_trusted:
+            lv = min(lv, 1)
         if lv:
             reasons.append(text)
         rank = max(rank, lv)
@@ -492,7 +498,7 @@ def rtt_stats(series, source):
             "series": [None if v is None else round(v, 1) for v in series]}
 
 
-def summarize_target(entry, probes, sent):
+def summarize_target(entry, probes, sent, link_jitter=None):
     """entry: {'name','host','port','slot'}; probes: {'ping'|'tcp'|'udp': Probe}."""
     t = {"name": entry["name"], "host": entry["host"], "port": entry.get("port"), "slot": entry["slot"],
          "rtt": None, "udp": None, "errors": [], "no_data": False}
@@ -509,6 +515,29 @@ def summarize_target(entry, probes, sent):
         if u.parsed and (u.parsed["up"] or u.parsed["down"]):
             t["udp"] = {"mode": u.mode, "up": u.parsed["up"], "down": u.parsed["down"],
                         "intervals": u.parsed["intervals"], "kbps": u.kbps}
+    return score_target(t, link_jitter)
+
+
+def udp_jitter_of(t):
+    """Worst-direction jitter of a target's UDP stream, or None."""
+    vals = [t["udp"][d]["jitter_ms"] for d in ("up", "down") if t.get("udp") and t["udp"].get(d) and t["udp"][d]["jitter_ms"] is not None]
+    return max(vals) if vals else None
+
+
+def link_udp_jitter(targets):
+    """The link's jitter as the UDP stream(s) measured it (median over targets that had one), or None."""
+    vals = [udp_jitter_of(t) for t in targets]
+    vals = [v for v in vals if v is not None]
+    return median_of(vals) if vals else None
+
+
+def score_target(t, link_jitter=None):
+    """Fill in metrics, rank, verdict and reasons of a target summary (also used to rescore saved runs).
+    Jitter: the target's own UDP stream if it had one; else the link's UDP jitter (marked "link"); else the
+    ping or TCP timing, which can only cost one level."""
+    for k in ("metrics", "rank", "verdict", "reasons"):
+        t.pop(k, None)
+    t["no_data"] = False
     rtt = t["rtt"]
     have_rtt = bool(rtt and rtt["received"])
     if not have_rtt and not t["udp"]:
@@ -517,24 +546,28 @@ def summarize_target(entry, probes, sent):
     losses = [rtt["loss_pct"]] if rtt else []
     # a couple of lost pings is noise, not a bad path: the verdict only counts ping loss from MIN_LOST packets up
     verdict_losses = [rtt["loss_pct"] if rtt["lost_total"] >= MIN_LOST else 0.0] if rtt else []
-    jitters = []
     if t["udp"]:
         for d in ("up", "down"):
             if t["udp"][d]:
                 losses.append(t["udp"][d]["loss_pct"])
                 verdict_losses.append(t["udp"][d]["loss_pct"])
-                if t["udp"][d]["jitter_ms"] is not None:
-                    jitters.append(t["udp"][d]["jitter_ms"])
+    own = udp_jitter_of(t)
+    if own is not None:
+        jitter, jitter_from = own, "udp"
+    elif link_jitter is not None:
+        jitter, jitter_from = link_jitter, "link"
+    else:
+        jitter, jitter_from = (rtt["jitter"] if rtt else 0.0), "rtt"
     loss = max(losses) if losses else 0.0
-    jitter = max(jitters) if jitters else (rtt["jitter"] if rtt else 0.0)
     avg = rtt["avg"] if have_rtt else 0.0
     p95 = rtt["p95"] if have_rtt else None
     longest = rtt["longest_lost"] if rtt else 0
     mos = mos_score(avg, jitter, loss)
-    rank, reasons = verdict_for(max(verdict_losses) if verdict_losses else 0.0, jitter, p95, mos, longest)
+    rank, reasons = verdict_for(max(verdict_losses) if verdict_losses else 0.0, jitter, p95, mos, longest,
+                                jitter_trusted=jitter_from != "rtt")
     t["metrics"] = {"loss_pct": round(loss, 2), "jitter_ms": round(jitter, 1),
                     "rtt_avg": avg, "rtt_p95": p95, "mos": round(mos, 2), "longest_lost": longest,
-                    "jitter_from": "udp" if jitters else "rtt"}
+                    "jitter_from": jitter_from}
     t["rank"], t["verdict"], t["reasons"] = rank, VERDICTS[rank], reasons
     return t
 
@@ -557,23 +590,17 @@ def common_dropouts(targets, sent):
     return lost_runs([None if f else 0 for f in flags])
 
 
-def build_result(run_id, started, duration, elapsed, partial, plan, probes_by_target, kbps, iperf_note):
-    sent = duration if not partial else max(1, min(duration, int(elapsed) - 1))
-    targets = [summarize_target(e, probes_by_target[e["name"]], sent) for e in plan]
+DERIVED_NOTE = re.compile(r"hit most targets at the same moment|is weaker than the rest|^Most affected:")
+
+
+def judge(targets, sent, base_notes):
+    """-> (overall, notes): the verdict for the run and the sentences explaining it. A pure function of the
+    per-target summaries, so saved runs can be judged again (rescore)."""
+    notes = list(base_notes)
     usable = [t for t in targets if not t["no_data"]]
-    notes = []
-    if iperf_note:
-        notes.append(iperf_note)
-    for t in targets:
-        if t["no_data"]:
-            notes.append("%s did not answer at all (%s)." % (t["name"], t["errors"][0] if t["errors"] else "no replies"))
-        else:
-            for e in t["errors"]:
-                notes.append("%s: %s" % (t["name"], e))
     drops = common_dropouts(targets, sent)
     longest_common = max(drops) if drops else 0
     if not usable:
-        rank = 2
         notes.insert(0, "Nothing answered. The link may be down, or this machine has no route out.")
         overall = {"rank": 2, "verdict": "POOR", "summary": "No network: nothing answered.", "mos": 1.0}
     else:
@@ -604,11 +631,30 @@ def build_result(run_id, started, duration, elapsed, partial, plan, probes_by_ta
             if bad:
                 notes.append("Most affected: %s." % "; ".join("%s (%s)" % (t["name"], ", ".join(t["reasons"])) for t in bad[:3]))
     overall["dropouts"] = {"events": len(drops), "longest_s": longest_common}
+    return overall, notes
+
+
+def build_result(run_id, started, duration, elapsed, partial, plan, probes_by_target, kbps, iperf_note):
+    sent = duration if not partial else max(1, min(duration, int(elapsed) - 1))
+    # the link's UDP jitter first, so targets without their own UDP stream can use it
+    first = [summarize_target(e, probes_by_target[e["name"]], sent) for e in plan]
+    link = link_udp_jitter(first)
+    targets = [score_target(t, link) for t in first] if link is not None else first
+    base = []
+    if iperf_note:
+        base.append(iperf_note)
+    for t in targets:
+        if t["no_data"]:
+            base.append("%s did not answer at all (%s)." % (t["name"], t["errors"][0] if t["errors"] else "no replies"))
+        else:
+            for e in t["errors"]:
+                base.append("%s: %s" % (t["name"], e))
     fix = location_fix()
     if fix is None or fix["lat"] is None:
-        notes.append("No fresh location fix, so this run has no %s. It still counts in the history, just without a map point."
-                     % ("place or coordinates" if fix is None else "coordinates"))
-    return {"version": 2, "id": run_id, "started": started, "duration_s": duration, "sent": sent,
+        base.append("No fresh location fix, so this run has no %s. It still counts in the history, just without a map point."
+                    % ("place or coordinates" if fix is None else "coordinates"))
+    overall, notes = judge(targets, sent, base)
+    return {"version": 3, "id": run_id, "started": started, "duration_s": duration, "sent": sent,
             "elapsed_s": round(elapsed, 1), "partial": partial, "host": platform.node(),
             "place": fix["place"] if fix else None,
             "geo": {"lat": fix["lat"], "lon": fix["lon"], "accuracy_m": fix["accuracy_m"], "fix_age_s": fix["age_s"]}
@@ -616,6 +662,21 @@ def build_result(run_id, started, duration, elapsed, partial, plan, probes_by_ta
             "udp_kbps": kbps, "targets": targets, "overall": overall, "notes": notes,
             "thresholds": {"good": GOOD, "marginal": MARGINAL, "outage_marginal_s": OUTAGE_MARGINAL,
                            "outage_poor_s": OUTAGE_POOR}}
+
+
+def rescore(r):
+    """Judge a saved run again under the current rules (jitter measure, UDP jitter, MIN_LOST). Changes the
+    verdicts and notes only; the measurements stay as they were."""
+    for t in r["targets"]:
+        if t.get("rtt") and t["rtt"].get("series") is not None:
+            t["rtt"]["jitter"] = round(rtt_jitter(t["rtt"]["series"]), 1)
+    link = link_udp_jitter(r["targets"])
+    for t in r["targets"]:
+        score_target(t, link)
+    base = [n for n in r.get("notes", []) if not DERIVED_NOTE.search(n)]
+    r["overall"], r["notes"] = judge(r["targets"], r.get("sent") or r["duration_s"], base)
+    r["version"] = max(r.get("version", 1), 3)
+    return r
 
 
 # ====================================================================================================
@@ -683,27 +744,62 @@ def read_history():
     return sorted(seen.values(), key=lambda x: x.get("started") or 0)
 
 
-def sync_history():
+def sync_history(rebuild=False):
     """Append a line for every saved run that is not in history.jsonl yet (this also fills in runs that
-    were saved before the history existed). Returns how many lines were added."""
-    have = {rec["id"] for rec in read_history()}
-    new = []
+    were saved before the history existed). With rebuild, every run's line is made again from its result.json
+    (after a rescore); lines of runs whose folder is gone are kept. Returns how many lines were added or redone."""
+    existing = {rec["id"]: rec for rec in read_history()}
     try:
         dirs = sorted(d for d in RUN_DIR.iterdir() if d.is_dir() and (d / "result.json").exists())
     except OSError:
         return 0
+    new = []
     for d in dirs:
-        if d.name in have:
+        if d.name in existing and not rebuild:
             continue
         try:
             new.append(history_record(json.loads((d / "result.json").read_text())))
         except (OSError, ValueError, KeyError, TypeError):
             continue
-    if new:
+    if not new:
+        return 0
+    if rebuild:
+        for rec in new:
+            existing[rec["id"]] = rec
+        lines = [json.dumps(rec, separators=(",", ":")) for rec in sorted(existing.values(), key=lambda x: x.get("started") or 0)]
+        tmp = history_path().with_name(HISTORY_NAME + ".tmp")
+        tmp.write_text("\n".join(lines) + "\n")
+        os.replace(str(tmp), str(history_path()))
+    else:
         with open(str(history_path()), "a") as f:
             for rec in new:
                 f.write(json.dumps(rec, separators=(",", ":")) + "\n")
     return len(new)
+
+
+def rescore_runs(dirs, say=print):
+    """Judge saved runs again under the current rules; keeps the first result.json as result.orig.json."""
+    done = 0
+    for d in dirs:
+        d = Path(d)
+        try:
+            r = json.loads((d / "result.json").read_text())
+            before = (r["overall"]["verdict"], r["overall"]["jitter_ms"] if "jitter_ms" in r["overall"] else None)
+            if not (d / "result.orig.json").exists():
+                (d / "result.orig.json").write_text(json.dumps(r))
+            rescore(r)
+            (d / "result.json").write_text(json.dumps(r))
+            write_report(d)
+        except (OSError, ValueError, KeyError, TypeError) as e:
+            say("%s: skipped (%s)" % (d.name, e))
+            continue
+        after = (r["overall"]["verdict"], r["overall"].get("jitter_ms"))
+        say("%s  %s -> %s%s" % (d.name, before[0].title() if before[0] else "-", after[0].title(),
+                               "" if before == after else "   jitter %s -> %s ms" % (before[1], after[1])))
+        done += 1
+    if done:
+        sync_history(rebuild=True)
+    return done
 
 
 # ====================================================================================================
@@ -1160,7 +1256,7 @@ def render_report(r, history=None):
             udp.append("%.1f ms / %.2f%%" % (u["jitter_ms"] or 0, u["loss_pct"]) if u else "-")
         out.append("<tr><td>%s</td><td>%s</td><td>%.2f</td><td>%s</td><td>%s</td><td>%s</td><td>%s%s</td><td>%.2f</td><td>%d s</td><td>%s</td><td>%s</td><td>%s</td></tr>" % (
             esc(t["name"]), esc(t["verdict"].title()), m["mos"], fmt(rt["avg"] if rt else None, "", 0), fmt(rt["p95"] if rt else None, "", 0),
-            fmt(rt["max"] if rt else None, "", 0), "%.1f" % m["jitter_ms"], " (udp)" if m["jitter_from"] == "udp" else "", m["loss_pct"], m["longest_lost"],
+            fmt(rt["max"] if rt else None, "", 0), "%.1f" % m["jitter_ms"], {"udp": " (udp)", "link": " (link udp)"}.get(m["jitter_from"], ""), m["loss_pct"], m["longest_lost"],
             esc("%d lost, avg %s ms at %d:%02d" % (ww["lost"], fmt(ww["avg"], "", 0), ww["start_s"] // 60, ww["start_s"] % 60) if ww else "-"), esc(udp[0]), esc(udp[1])))
     out.append("</table></div>")
 
@@ -1183,7 +1279,8 @@ def render_report(r, history=None):
     out.append('<p class="foot">How to read this: a target is Good when loss is at most %g%%, jitter at most %g ms and the slowest 5%% of round trips '
                "under %g ms; Marginal up to %g%% / %g ms / %g ms; worse is Poor. A dropout of %d s or more drops it a level (%d s or more: Poor). "
                "The score is a simplified E-model estimate and is best used to compare runs. Ping and TCP probes are one per second, so loss under about 1%% "
-               "needs the UDP stream to see it.</p>" % (g["loss"], g["jitter"], g["rtt"], mg["loss"], mg["jitter"], mg["rtt"], OUTAGE_MARGINAL, OUTAGE_POOR))
+               "needs the UDP stream to see it. Jitter comes from the UDP stream when there is one (a target without its own uses the link's, marked "
+               "link udp); from ping or TCP timing alone it is the typical second-to-second change and can lower a verdict by one level only.</p>" % (g["loss"], g["jitter"], g["rtt"], mg["loss"], mg["jitter"], mg["rtt"], OUTAGE_MARGINAL, OUTAGE_POOR))
     out.append('<div id="tip"></div>')
     out.append('<script type="application/json" id="nt-data">%s</script>' % json.dumps({"panels": panels}).replace("<", "\\u003c"))
     out.append("<script>%s</script></main></body></html>" % JS)
@@ -1471,7 +1568,7 @@ def latest_dir():
 # ====================================================================================================
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
-    if not argv or argv[0] not in ("run", "report", "latest", "compare", "history", "-h", "--help"):
+    if not argv or argv[0] not in ("run", "report", "latest", "compare", "history", "rescore", "-h", "--help"):
         argv.insert(0, "run")
     ap = argparse.ArgumentParser(description="Network health test for video calls")
     sub = ap.add_subparsers(dest="cmd")
@@ -1489,6 +1586,8 @@ def main(argv=None):
     cp = sub.add_parser("compare", help="write compare.html: every saved run on one graph")
     cp.add_argument("--out", help="where to write it (default: next to the runs)")
     sub.add_parser("history", help="list the saved runs")
+    rs = sub.add_parser("rescore", help="judge saved runs again under the current scoring rules")
+    rs.add_argument("dir", nargs="*", help="run folders (default: all)")
     args = ap.parse_args(argv)
     if args.cmd == "report":
         d = Path(args.dir) if args.dir else latest_dir()
@@ -1500,6 +1599,14 @@ def main(argv=None):
     if args.cmd == "compare":
         path, n = write_compare(args.out)
         print("%s  (%d run%s)" % (path, n, "" if n == 1 else "s"))
+        return 0 if n else 2
+    if args.cmd == "rescore":
+        dirs = [Path(x) for x in args.dir] if args.dir else sorted(d for d in RUN_DIR.iterdir() if d.is_dir() and (d / "result.json").exists()) if RUN_DIR.is_dir() else []
+        if not dirs:
+            print("No runs saved yet.")
+            return 2
+        n = rescore_runs(dirs)
+        print("%d run%s rescored. Originals are kept as result.orig.json." % (n, "" if n == 1 else "s"))
         return 0 if n else 2
     if args.cmd == "history":
         sync_history()

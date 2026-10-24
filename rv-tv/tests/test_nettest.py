@@ -59,7 +59,7 @@ s = sorted([10.0, 20.0, 30.0, 40.0, 50.0])
 check("percentile 50", close(nt.percentile(s, 50), 30.0))
 check("percentile 95 interpolates", close(nt.percentile(s, 95), 48.0))
 check("percentile of nothing", nt.percentile([], 50) is None)
-check("jitter: mean abs neighbour difference", close(nt.rtt_jitter([10, 14, 12, None, 20, 21]), (4 + 2 + 1) / 3.0))
+check("jitter: median abs neighbour difference", close(nt.rtt_jitter([10, 14, 12, None, 20, 21]), 2.0))
 check("lost runs", nt.lost_runs([1, None, None, 2, None, 3, None]) == [2, 1, 1], nt.lost_runs([1, None, None, 2, None, 3, None]))
 check("lost run at the end counted", nt.lost_runs([1, None, None]) == [2])
 
@@ -216,6 +216,35 @@ check("UDP loss makes the target poor", tg["verdict"] == "POOR" and any("packet 
 res = run_of(plan_of("a"), {"a": {"ping": FakeRtt(wobble(N)), "udp": FakeUdp(None, error="could not run iperf3")}})
 check("a failed iperf3 falls back to ping and says so", res["targets"][0]["verdict"] == "GOOD" and any("iperf3: could not run" in n for n in res["notes"]), res["notes"])
 
+# ---- jitter: one stalled second is not a jittery link; ping-only jitter alone cannot make a target poor ----
+stall = wobble(60, 40.0)
+stall[30] = 1300.0
+check("jitter: one stalled second does not make a jittery link", nt.rtt_jitter(stall) <= 10, nt.rtt_jitter(stall))
+alt = [30.0 if i % 2 else 91.0 for i in range(60)]
+res = run_of(plan_of("a", "b", "c"), {"a": {"ping": FakeRtt(alt)}, "b": {"ping": FakeRtt(wobble(60, 40.0))}, "c": {"ping": FakeRtt(wobble(60, 25.0))}})
+ta = res["targets"][0]
+check("ping-only jitter of 61 ms: marginal, not poor", ta["metrics"]["jitter_from"] == "rtt" and ta["metrics"]["jitter_ms"] == 61.0 and ta["verdict"] == "MARGINAL"
+      and any("61 ms jitter" in r for r in ta["reasons"]), (ta["metrics"], ta["verdict"]))
+quiet = nt.parse_iperf(fixture("iperf-udp-bidir.json"))
+res = run_of(plan_of("a", "b"), {"a": {"ping": FakeRtt(alt), "udp": FakeUdp(quiet)}, "b": {"ping": FakeRtt(alt)}})
+tb = res["targets"][1]
+check("a target without its own UDP uses the link's UDP jitter", tb["metrics"]["jitter_from"] == "link" and tb["metrics"]["jitter_ms"] < 1 and tb["verdict"] == "GOOD", tb["metrics"])
+check("the target with UDP keeps its own", res["targets"][0]["metrics"]["jitter_from"] == "udp" and res["overall"]["verdict"] == "GOOD", res["targets"][0]["metrics"])
+page = nt.render_report(res, history=[])
+check("report marks borrowed jitter as link udp", "(link udp)" in page and "(udp)" in page)
+
+import copy
+old = copy.deepcopy(res)
+for t in old["targets"]:
+    t["metrics"]["jitter_ms"], t["verdict"], t["rank"] = 99.0, "POOR", 2
+old["overall"].update(verdict="POOR", rank=2)
+old["notes"] = ["iperf3: kept note", "b is weaker than the rest (99 ms jitter): that path is the problem, not the whole link."]
+once = nt.rescore(copy.deepcopy(old))
+check("rescore: verdicts follow the current rules", once["overall"]["verdict"] == "GOOD" and all(t["verdict"] == "GOOD" for t in once["targets"]), once["overall"])
+check("rescore: other notes stay, explanatory ones are remade", "iperf3: kept note" in once["notes"] and not any("weaker" in n for n in once["notes"]), once["notes"])
+check("rescore: twice gives the same", json.dumps(nt.rescore(copy.deepcopy(once)), sort_keys=True) == json.dumps(once, sort_keys=True))
+check("rescore: measurements untouched", once["targets"][0]["rtt"]["series"] == res["targets"][0]["rtt"]["series"] and once["targets"][0]["udp"] == res["targets"][0]["udp"])
+
 res = run_of(plan_of("a"), {"a": {"ping": FakeRtt(wobble(25))}}, duration=600, partial=True, elapsed=26)
 check("stopped early: sample count follows the elapsed time", res["partial"] and 20 <= res["sent"] <= 25, res["sent"])
 
@@ -368,7 +397,7 @@ if lines:
     h0 = json.loads(lines[0])
     first = json.loads(sorted(runs1.glob("*/result.json"))[0].read_text())
     check("history: place, coordinates and accuracy are logged", h0["place"] == "Cloverdale, OR" and h0["lat"] == 45.0 and h0["lon"] == -123.9 and h0["accuracy_m"] == 60, h0)
-    check("history: result.json carries the geo tag", first["geo"]["lat"] == 45.0 and first["geo"]["accuracy_m"] == 60 and first["version"] == 2, first.get("geo"))
+    check("history: result.json carries the geo tag", first["geo"]["lat"] == 45.0 and first["geo"]["accuracy_m"] == 60 and first["version"] == 3, first.get("geo"))
     check("history: 12 s run -> two 10 s points, four series", all(len(h0["bins"][k]) == 2 for k in ("p50", "p95", "jitter", "loss")) and h0["bin_s"] == 10, h0["bins"])
     check("history: marked short, with the verdict numbers", h0["short"] and h0["verdict"] and h0["mos"] and h0["targets"] and h0["id"] == first["id"], h0)
 nt.RUN_DIR = runs1
@@ -379,6 +408,13 @@ check("history: rebuilt from the saved runs (backfill)", len(hist1.read_text().s
 with open(str(hist1), "a") as fh:
     fh.write("this is not json\n")
 check("history: a damaged line is skipped, not fatal", len(nt.read_history()) == 2)
+
+cp = run_tool(["rescore"], runs1)
+check("rescore subcommand: every run, originals kept", cp.returncode == 0 and "2 runs rescored" in cp.stdout and len(list(runs1.glob("*/result.orig.json"))) == 2, cp.stdout)
+check("rescore: history rebuilt clean with both runs", len(nt.read_history()) == 2 and "not json" not in hist1.read_text(), hist1.read_text()[:200])
+check("rescore: reports redrawn", all((d / "report.html").exists() for d in runs1.glob("2*")))
+cp = run_tool(["rescore"], TMP / "empty-runs2")
+check("rescore with no runs says so", cp.returncode == 2 and "No runs" in cp.stdout, (cp.returncode, cp.stdout))
 
 b = nt.rtt_bins([{"rtt": {"received": 1, "series": [10.0, 20.0, None, 40.0] + [None] * 6 + [100.0] * 10}}], 20)
 check("bins: median, 95th, jitter and loss per 10 s", b["p50"] == [20.0, 100.0] and b["loss"] == [70.0, 0.0] and b["jitter"] == [10.0, 0.0] and b["p95"][1] == 100.0, b)

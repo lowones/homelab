@@ -113,6 +113,13 @@ report, `latest` prints the newest folder, `--duration 60` shortens the test, Ct
   that makes a difference look like a place effect. Each row has a map link from its coordinates.
 - A target is only called weaker than the rest when at least 3 pings were lost (`MIN_LOST`); 1 lost ping in 60 is
   1.7 % but is not evidence of a bad path.
+- **Jitter** comes from the iperf3 UDP stream when there is one. A target without its own UDP stream (Cloudflare,
+  Meet, ...) uses the link's UDP jitter, marked "link udp" in the table. With no UDP at all it is the typical
+  (median) second-to-second change of the ping or TCP time, and that can cost a target one level, never two: a
+  single stalled second used to read as 60 ms of jitter and a Poor verdict.
+- **Rescore:** `python3 nettest.py rescore [DIR...]` judges saved runs again under the current rules (default all):
+  verdicts, jitter and the explanatory notes change, the measurements do not. The first `result.json` is kept as
+  `result.orig.json`; reports and `history.jsonl` are redrawn.
 - Checks: `python3 tests/test_nettest.py` (about 40 s; uses stand-in `tests/fakeping.py` and `fakeiperf.py`, and a
   real iperf3 over loopback when one is installed; the fixtures in `tests/fixtures/` are real iperf3 3.22 output).
 
