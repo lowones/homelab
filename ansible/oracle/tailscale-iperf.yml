@@ -24,17 +24,28 @@
         that: ansible_facts['distribution'] == 'Debian'
         fail_msg: "tailscale-iperf.yml expects Debian (oracle runs Debian 13)"
 
-    - name: Tailscale package signing key
+    - name: Look for the Tailscale key and apt repo file
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop:
+        - "{{ tailscale_keyring }}"
+        - /etc/apt/sources.list.d/tailscale.list
+      register: ts_files
+      check_mode: false
+
+    - name: Tailscale package signing key (fetched only if missing)
       ansible.builtin.get_url:
         url: "{{ tailscale_repo_base }}.noarmor.gpg"
         dest: "{{ tailscale_keyring }}"
         mode: "0644"
+      when: not ts_files.results[0].stat.exists
 
-    - name: Tailscale apt repository
+    - name: Tailscale apt repository (fetched only if missing)
       ansible.builtin.get_url:
         url: "{{ tailscale_repo_base }}.tailscale-keyring.list"
         dest: /etc/apt/sources.list.d/tailscale.list
         mode: "0644"
+      when: not ts_files.results[1].stat.exists
       register: tailscale_repo
 
     - name: Install tailscale and iperf3
