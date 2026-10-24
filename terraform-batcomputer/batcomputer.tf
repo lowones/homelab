@@ -1,5 +1,9 @@
 # batcomputer (VM 101): the Ubuntu desktop VM that runs Terraform and Ansible for this repo.
 #
+# Left out on purpose, as they are on grid: the guest agent is not set up (no agent line), and the Ubuntu
+# desktop install ISO is still attached as ide2. Declaring either made the plan change them (the provider's
+# cdrom block defaults to enabled = false, which would eject the ISO), so the VM's config is not touched.
+#
 # It already existed (created 2025-04-29 by hand from the Ubuntu 24.04.2 desktop ISO), so this file
 # describes it as it is on grid and it is imported, not created:
 #   terraform import proxmox_virtual_environment_vm.batcomputer grid/101
@@ -12,10 +16,6 @@ resource "proxmox_virtual_environment_vm" "batcomputer" {
   vm_id     = 101
   node_name = "grid"
   on_boot   = true
-
-  agent {
-    enabled = false
-  }
 
   operating_system {
     type = "l26"
@@ -41,12 +41,6 @@ resource "proxmox_virtual_environment_vm" "batcomputer" {
     file_format  = "qcow2"
     size         = 100
     iothread     = true
-  }
-
-  # the Ubuntu desktop install ISO is still attached
-  cdrom {
-    file_id   = "DATA:iso/ubuntu-24.04.2-desktop-amd64.iso"
-    interface = "ide2"
   }
 
   network_device {
