@@ -85,6 +85,24 @@ Keeping it running (survives reboots and drops):
   (`TV_CAMS_SSH_HOST`, default `oracle-r`), starts it at login and reconnects within about 15 s.
   `--print` shows the plist, `--remove` takes it out. Log: `.run/camtunnel.log`.
 
+## Network test for video calls (`nettest.py`)
+`python3 nettest.py` (or `./tv nettest`) runs a 10-minute test from the machine it is on and writes a
+report with a graph per target plus health numbers (call-quality score, round trip, jitter, loss, longest
+dropout, a verdict of Good / Marginal / Poor). Standard library only. Runs live in `.run/nettest/<date-time>/`
+(`result.json`, `report.html`, `raw/` = what ping and iperf3 printed). `python3 nettest.py report [DIR]` redraws a
+report, `latest` prints the newest folder, `--duration 60` shortens the test, Ctrl-C stops early and still saves.
+- **Ping** (1/s) to every target, **TCP connect timing** (1/s) to Meet, Zoom and Teams (they ignore ping), and
+  **iperf3 UDP** (1.5 Mbit/s both ways, like a video call) to servers listed in `TV_NETTEST_IPERF`.
+- iperf3 needs `brew install iperf3` on the mini and a server on the far end (`iperf3 -s`; oracle already has
+  one on 5201). Without it the test still runs on ping and TCP and says so.
+- Config in `tv.env`: `TV_NETTEST_IPERF=vps=host,oracle=host`, `TV_NETTEST_PING`, `TV_NETTEST_TCP`,
+  `TV_NETTEST_SECONDS`, `TV_NETTEST_KBPS` (formats at the top of `nettest.py`; flags override).
+- How the verdict is decided is printed at the bottom of every report. Thresholds are constants at the top of
+  `nettest.py` (`GOOD`, `MARGINAL`, `OUTAGE_*`). When most targets drop the same second, the report blames the
+  link (dish, Wi-Fi); when only one does, it blames that path.
+- Checks: `python3 tests/test_nettest.py` (about 40 s; uses stand-in `tests/fakeping.py` and `fakeiperf.py`, and a
+  real iperf3 over loopback when one is installed; the fixtures in `tests/fixtures/` are real iperf3 3.22 output).
+
 ## Workflow
 1. `git switch -c my-feature`
 2. Edit, then `bash tests/smoke.sh` (must print ALL PASSED)

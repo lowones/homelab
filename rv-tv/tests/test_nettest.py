@@ -1,0 +1,338 @@
+#!/usr/bin/env python3
+"""Checks for nettest.py: parsers, scoring, report, and short end-to-end runs against stand-in ping and
+iperf3 (plus a real iperf3 over loopback when one is installed). Plain python, no network:
+    python3 tests/test_nettest.py            (about 40 seconds)
+Set NETTEST_REAL_IPERF3=/path/to/iperf3 to use an iperf3 that is not on PATH."""
+import importlib.util
+import json
+import os
+import shutil
+import signal
+import socket
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+TESTS = ROOT / "tests"
+TMP = Path(tempfile.mkdtemp(prefix="rvtv-nettest-"))
+os.environ.update(TV_ENV_FILE=str(TMP / "none.env"), TV_NETTEST_DIR=str(TMP / "runs"),
+                  TV_LOCATION_FILE=str(TMP / "location.raw"))
+spec = importlib.util.spec_from_file_location("nettest", ROOT / "nettest.py")
+nt = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(nt)
+for stub in ("fakeping.py", "fakeiperf.py"):
+    (TESTS / stub).chmod(0o755)
+FAKEPING, FAKEIPERF = str(TESTS / "fakeping.py"), str(TESTS / "fakeiperf.py")
+
+fails = []
+
+
+def check(name, ok, extra=""):
+    print(("ok   " if ok else "FAIL ") + name + ("" if ok else "  " + str(extra)))
+    if not ok:
+        fails.append(name)
+
+
+def close(a, b, tol=0.01):
+    return a is not None and abs(a - b) <= tol
+
+
+def fixture(name):
+    return json.loads((TESTS / "fixtures" / name).read_text())
+
+
+# ---- small helpers --------------------------------------------------------------------------------
+t = nt.parse_targets("vps=example.net:5300, oracle=oracle.ts.net,x=1.2.3.4", "iperf")
+check("iperf targets: port parsed, default 5201", [(a["name"], a["host"], a["port"]) for a in t] ==
+      [("vps", "example.net", 5300), ("oracle", "oracle.ts.net", 5201), ("x", "1.2.3.4", 5201)], t)
+t = nt.parse_targets("meet=meet.google.com:443,zoom=zoom.us", "tcp")
+check("tcp targets: default 443", [(a["host"], a["port"]) for a in t] == [("meet.google.com", 443), ("zoom.us", 443)], t)
+t = nt.parse_targets("cf=1.1.1.1", "ping")
+check("ping targets have no port", t == [{"name": "cf", "host": "1.1.1.1", "port": None}], t)
+check("empty spec is empty", nt.parse_targets("", "ping") == [])
+
+s = sorted([10.0, 20.0, 30.0, 40.0, 50.0])
+check("percentile 50", close(nt.percentile(s, 50), 30.0))
+check("percentile 95 interpolates", close(nt.percentile(s, 95), 48.0))
+check("percentile of nothing", nt.percentile([], 50) is None)
+check("jitter: mean abs neighbour difference", close(nt.rtt_jitter([10, 14, 12, None, 20, 21]), (4 + 2 + 1) / 3.0))
+check("lost runs", nt.lost_runs([1, None, None, 2, None, 3, None]) == [2, 1, 1], nt.lost_runs([1, None, None, 2, None, 3, None]))
+check("lost run at the end counted", nt.lost_runs([1, None, None]) == [2])
+
+m = nt.mos_score(40, 5, 0)
+check("MOS of a clean path is excellent", 4.3 <= m <= 4.5, m)
+check("MOS falls with loss", nt.mos_score(40, 5, 5) < nt.mos_score(40, 5, 1) < m)
+check("MOS falls with jitter", nt.mos_score(40, 60, 0) < nt.mos_score(40, 10, 0))
+check("MOS falls with latency", nt.mos_score(600, 5, 0) < nt.mos_score(100, 5, 0))
+check("MOS never leaves 1..4.5", 1.0 <= nt.mos_score(5000, 500, 100) <= 4.5 and nt.mos_score(1, 0, 0) <= 4.5)
+
+r, why = nt.verdict_for(0.0, 5, 40, 4.4, 0)
+check("verdict good", r == 0 and not why, (r, why))
+r, why = nt.verdict_for(2.0, 5, 40, 4.2, 0)
+check("verdict marginal on loss", r == 1 and "2.0% packet loss" in why, (r, why))
+r, why = nt.verdict_for(5.0, 5, 40, 4.0, 0)
+check("verdict poor on loss", r == 2, (r, why))
+r, why = nt.verdict_for(0.0, 45, 40, 4.2, 0)
+check("verdict marginal on jitter", r == 1 and "45 ms jitter" in why, (r, why))
+r, why = nt.verdict_for(0.0, 5, 400, 4.2, 0)
+check("verdict poor on round trip", r == 2, (r, why))
+r, why = nt.verdict_for(0.0, 5, 40, 4.4, 3)
+check("3 s dropout is marginal", r == 1 and any("3 s dropout" in w for w in why), (r, why))
+r, why = nt.verdict_for(0.0, 5, 40, 4.4, 8)
+check("8 s dropout is poor", r == 2, (r, why))
+r, why = nt.verdict_for(0.0, 5, 40, 3.7, 0)
+check("low score alone gives marginal with a reason", r == 1 and why, (r, why))
+
+# ---- ping output ----------------------------------------------------------------------------------
+M = nt.PING_RE
+mac = M.search("64 bytes from 1.1.1.1: icmp_seq=0 ttl=57 time=22.123 ms")
+lin = M.search("64 bytes from 1.1.1.1: icmp_seq=12 ttl=58 time=12.3 ms")
+fast = M.search("64 bytes from 127.0.0.1: icmp_seq=3 ttl=64 time<1 ms")
+check("ping regex: macOS line", mac and (mac.group(1), mac.group(2)) == ("0", "22.123"))
+check("ping regex: Linux line", lin and (lin.group(1), lin.group(2)) == ("12", "12.3"))
+check("ping regex: ignores timeouts", M.search("Request timeout for icmp_seq 4") is None)
+check("ping regex: ignores summary", M.search("5 packets transmitted, 5 packets received, 0.0% packet loss") is None)
+
+# ---- iperf3 JSON (captured from a real iperf3 3.22 over loopback) -----------------------------------
+p = nt.parse_iperf(fixture("iperf-udp-bidir.json"))
+check("iperf bidir: upload summary", p["up"] and p["up"]["packets"] == 626 and p["up"]["loss_pct"] == 0 and close(p["up"]["jitter_ms"], 0.0099, 0.001), p["up"])
+check("iperf bidir: download summary", p["down"] and p["down"]["packets"] == 626 and close(p["down"]["jitter_ms"], 0.0148, 0.001), p["down"])
+check("iperf bidir: four per-second rows with both directions",
+      len(p["intervals"]) == 4 and all("up_jitter" in r and "down_jitter" in r for r in p["intervals"]), p["intervals"][:2])
+check("iperf bidir: seconds numbered from 0", [r["t"] for r in p["intervals"]] == [0, 1, 2, 3], [r["t"] for r in p["intervals"]])
+p = nt.parse_iperf(fixture("iperf-udp-reverse.json"))
+check("iperf reverse: download only", p["down"] and p["up"] is None and all("up_jitter" not in r for r in p["intervals"]), p)
+p = nt.parse_iperf(fixture("iperf-udp-forward.json"))
+check("iperf forward: upload only", p["up"] and p["down"] is None, p)
+check("iperf forward: upload per-second rows come from the server text", len(p["intervals"]) == 3 and all("up_jitter" in r for r in p["intervals"]), p["intervals"])
+p = nt.parse_iperf(fixture("iperf-udp-bidir-lossy.json"))
+check("iperf lossy: summary loss", close(p["down"]["loss_pct"], 4.952) and close(p["up"]["loss_pct"], 1.917), (p["up"], p["down"]))
+check("iperf lossy: spike seconds found", close(p["intervals"][1]["down_jitter"], 41.0) and p["intervals"][1]["down_lost"] == 31
+      and close(p["intervals"][2]["up_jitter"], 55.0) and p["intervals"][2]["up_lost"] == 12, p["intervals"])
+p = nt.parse_iperf({"start": {}, "intervals": [], "end": {}, "error": "error - the server is busy running a test. try again later"})
+check("iperf error text kept", p["error"] and "busy" in p["error"] and p["up"] is None and p["down"] is None, p)
+p = nt.parse_iperf({"start": {"test_start": {"reverse": 1}}, "intervals": [], "end": {"sum": {"jitter_ms": 2.0, "lost_packets": 1, "packets": 100, "lost_percent": 1}}})
+check("iperf old layout: sums only", p["down"] and close(p["down"]["jitter_ms"], 2.0), p)
+
+
+# ---- scoring a whole run from fake probes ----------------------------------------------------------
+class FakeRtt:
+    def __init__(self, vals, kind="ping", error=None):
+        self.vals, self.error, self.results, self.replies = vals, error, {i: v for i, v in enumerate(vals) if v is not None}, {}
+
+    def series(self, sent):
+        return (self.vals + [None] * sent)[:sent]
+
+
+class FakeUdp:
+    def __init__(self, parsed, error=None):
+        self.parsed, self.error, self.mode, self.kbps = parsed, error, "bidir", 1500
+
+
+def wobble(n, base=30.0):
+    return [base + (i % 5) * 2.0 for i in range(n)]
+
+
+def plan_of(*names):
+    return [{"name": n, "host": n + ".test", "port": None, "kind": "ping", "slot": i} for i, n in enumerate(names)]
+
+
+def run_of(plan, probes, duration=60, partial=False, elapsed=None):
+    return nt.build_result("20260101-000000", time.time(), duration, duration if elapsed is None else elapsed, partial, plan, probes, 1500, None)
+
+
+N = 60
+res = run_of(plan_of("a", "b", "c"), {n: {"ping": FakeRtt(wobble(N, base))} for n, base in (("a", 30.0), ("b", 40.0), ("c", 25.0))})
+o = res["overall"]
+check("clean link: good", o["verdict"] == "GOOD" and o["rank"] == 0 and o["mos"] >= 4.2, o)
+check("clean link: numbers present", o["usable"] == 3 and close(o["loss_pct"], 0) and o["longest_lost"] == 0 and o["rtt_avg"] > 0, o)
+check("clean link: no complaints", not res["notes"], res["notes"])
+check("targets keep their colour slot", [tg["slot"] for tg in res["targets"]] == [0, 1, 2])
+
+drop = wobble(N)
+for i in range(20, 24):
+    drop[i] = None
+res = run_of(plan_of("a", "b", "c"), {n: {"ping": FakeRtt(list(drop))} for n in "abc"})
+o = res["overall"]
+check("shared 4 s dropout: link verdict is at least marginal", o["rank"] >= 1 and o["dropouts"]["events"] == 1 and o["dropouts"]["longest_s"] == 4, o)
+check("shared dropout: note blames the link", any("same moment" in n for n in res["notes"]), res["notes"])
+
+lossy = wobble(N)
+for i in range(0, N, 10):
+    lossy[i + 5] = None                                    # 6 of 60 lost = 10 %
+res = run_of(plan_of("a", "b", "c"), {"a": {"ping": FakeRtt(wobble(N))}, "b": {"ping": FakeRtt(wobble(N))}, "c": {"ping": FakeRtt(lossy)}})
+check("one bad target: link still good", res["overall"]["rank"] == 0, res["overall"])
+check("one bad target: that target is poor and named", [tg["verdict"] for tg in res["targets"]] == ["GOOD", "GOOD", "POOR"]
+      and any("c is weaker" in n for n in res["notes"]), (res["targets"][2].get("verdict"), res["notes"]))
+check("one bad target: no shared dropout claimed", res["overall"]["dropouts"]["events"] == 0, res["overall"]["dropouts"])
+
+res = run_of(plan_of("a", "b"), {"a": {"ping": FakeRtt([None] * N, error="ping: a.test: Name or service not known")}, "b": {"ping": FakeRtt([None] * N, error="no reply")}})
+check("nothing answers: poor, no score", res["overall"]["verdict"] == "POOR" and res["overall"]["mos"] == 1.0 and any("Nothing answered" in n for n in res["notes"]), res["overall"])
+
+res = run_of(plan_of("a", "b"), {"a": {"ping": FakeRtt(wobble(N))}, "b": {"ping": FakeRtt([None] * N, error="ping: b.test: Name or service not known")}})
+check("a silent target is reported but does not sink the rest", res["overall"]["verdict"] == "GOOD" and res["targets"][1]["no_data"]
+      and any("b did not answer" in n for n in res["notes"]), (res["overall"], res["notes"]))
+
+udp = nt.parse_iperf(fixture("iperf-udp-bidir-lossy.json"))
+res = run_of(plan_of("a"), {"a": {"ping": FakeRtt(wobble(N)), "udp": FakeUdp(udp)}})
+tg = res["targets"][0]
+check("UDP numbers drive jitter and loss", tg["metrics"]["jitter_from"] == "udp" and close(tg["metrics"]["loss_pct"], 4.95) and close(tg["metrics"]["jitter_ms"], 24.5), tg["metrics"])
+check("UDP loss makes the target poor", tg["verdict"] == "POOR" and any("packet loss" in r for r in tg["reasons"]), tg.get("reasons"))
+res = run_of(plan_of("a"), {"a": {"ping": FakeRtt(wobble(N)), "udp": FakeUdp(None, error="could not run iperf3")}})
+check("a failed iperf3 falls back to ping and says so", res["targets"][0]["verdict"] == "GOOD" and any("iperf3: could not run" in n for n in res["notes"]), res["notes"])
+
+res = run_of(plan_of("a"), {"a": {"ping": FakeRtt(wobble(25))}}, duration=600, partial=True, elapsed=26)
+check("stopped early: sample count follows the elapsed time", res["partial"] and 20 <= res["sent"] <= 25, res["sent"])
+
+# ---- the report -----------------------------------------------------------------------------------
+udp = nt.parse_iperf(fixture("iperf-udp-bidir-lossy.json"))
+plan = [{"name": "vps<b>", "host": "x.test", "port": None, "kind": "iperf", "slot": 0},
+        {"name": "meet", "host": "meet.test", "port": 443, "kind": "tcp", "slot": 1}]
+res = run_of(plan, {"vps<b>": {"ping": FakeRtt(wobble(N)), "udp": FakeUdp(udp)}, "meet": {"ping": FakeRtt(drop)}})
+page = nt.render_report(res, history=[{"id": "20260102-030405", "place": "Seaside, OR", "verdict": "GOOD", "rank": 0, "mos": 4.3, "p95": 55.0, "jitter": 4.0, "loss": 0.0, "duration": 600, "partial": False}])
+check("report: self-contained page", page.startswith("<!doctype html>") and "http://" not in page.replace("http://www.w3.org", "") and "https://" not in page)
+check("report: score, verdict and chart present", "Call quality score" in page and "<svg class=\"plot\"" in page and page.count('class="plot"') >= 4, page.count('class="plot"'))
+check("report: a name with markup is escaped", "vps<b>" not in page.replace("\\u003c", "<").split('id="nt-data"')[0] and "vps&lt;b&gt;" in page)
+check("report: no stray None or nan", "None" not in page and "nan" not in page.lower().replace("nanosecond", ""), [w for w in ("None", "nan") if w in page])
+data = json.loads(page.split('id="nt-data">')[1].split("</script>")[0].replace("\\u003c", "<"))
+check("report: hover data for every panel", len(data["panels"]) >= 4 and all(len(v["vals"]) == v["n"] for v in data["panels"].values()), list(data["panels"]))
+check("report: shows earlier runs", "Earlier runs" in page and "Seaside, OR" in page)
+check("report: dark mode and loss ticks", "prefers-color-scheme:dark" in page and 'class="lostt"' in page)
+check("report: no unformatted template tokens", "%(" not in page and "%s" not in page and "%d" not in page)
+
+# ---- end to end: stand-in ping and iperf3, real TCP to a local port ---------------------------------
+srv = socket.socket()
+srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+srv.bind(("127.0.0.1", 0))
+srv.listen(16)
+tcp_port = srv.getsockname()[1]
+
+
+def accept_loop():
+    while True:
+        try:
+            c, _ = srv.accept()
+            c.close()
+        except OSError:
+            return
+
+
+threading.Thread(target=accept_loop, daemon=True).start()
+
+
+def env_for(runs, extra=None):
+    e = dict(os.environ, TV_ENV_FILE=str(TMP / "none.env"), TV_NETTEST_DIR=str(runs), TV_LOCATION_FILE=str(TMP / "location.raw"),
+             TV_NETTEST_PING_BIN=FAKEPING, TV_NETTEST_IPERF_BIN=FAKEIPERF)
+    e.update(extra or {})
+    return e
+
+
+def run_tool(args, runs, extra=None, timeout=120):
+    return subprocess.run([sys.executable, str(ROOT / "nettest.py")] + args, env=env_for(runs, extra), stdout=subprocess.PIPE,
+                          stderr=subprocess.STDOUT, universal_newlines=True, timeout=timeout)
+
+
+runs1 = TMP / "e2e1"
+(TMP / "location.raw").write_text("45.0|-123.9|60|Cloverdale|OR\n")
+t0 = time.time()
+cp = run_tool(["--duration", "12", "--iperf", "vps=127.0.0.1:5201,refused=127.0.0.1:1", "--ping", "ok=ok.test,loss=loss.test,dead=dead.test",
+               "--tcp", "local=127.0.0.1:%d" % tcp_port], runs1)
+print("     (took %.0f s)" % (time.time() - t0))
+check("e2e: finishes with exit 0", cp.returncode == 0, cp.stdout[-600:])
+found = sorted(runs1.glob("*/result.json"))
+check("e2e: wrote result.json and report.html", len(found) == 1 and (found[0].parent / "report.html").exists())
+if found:
+    res = json.loads(found[0].read_text())
+    byname = {x["name"]: x for x in res["targets"]}
+    check("e2e: all targets present", set(byname) == {"vps", "refused", "ok", "loss", "dead", "local"}, set(byname))
+    check("e2e: ok target answered every probe", byname["ok"]["rtt"]["received"] == 12 and byname["ok"]["verdict"] == "GOOD", byname["ok"].get("rtt", {}).get("received"))
+    check("e2e: dropout found in the loss target", byname["loss"]["rtt"]["longest_lost"] == 4 and byname["loss"]["rtt"]["lost_total"] == 4, byname["loss"]["rtt"]["lost_total"])
+    check("e2e: dead target reported, not fatal", byname["dead"]["no_data"] and any("Name or service" in e for e in byname["dead"]["errors"]), byname["dead"]["errors"])
+    check("e2e: TCP probe timed local connects", byname["local"]["rtt"]["source"] == "tcp" and byname["local"]["rtt"]["received"] >= 11, byname["local"]["rtt"]["received"])
+    check("e2e: iperf3 numbers attached to the vps target", byname["vps"]["udp"] and byname["vps"]["udp"]["up"] and byname["vps"]["udp"]["down"], byname["vps"]["udp"])
+    check("e2e: iperf3 connection refusal is kept as a note", byname["refused"]["udp"] is None and any("Connection refused" in e for e in byname["refused"]["errors"]), byname["refused"]["errors"])
+    check("e2e: place picked up from the location fix", res["place"] == "Cloverdale, OR", res["place"])
+    check("e2e: raw tool output saved", (found[0].parent / "raw" / "udp-vps.json").exists() and (found[0].parent / "raw" / "ping-ok.txt").exists())
+    check("e2e: the shared dropout is not claimed when only one target dropped", res["overall"]["dropouts"]["events"] == 0, res["overall"]["dropouts"])
+check("e2e: summary printed", "call quality" in cp.stdout and "Report:" in cp.stdout, cp.stdout[-300:])
+
+time.sleep(1.1)                                                   # run ids are timestamps
+cp = run_tool(["--duration", "6", "--iperf", "", "--ping", "ok=ok.test", "--tcp", "local=127.0.0.1:%d" % tcp_port], runs1)
+found = sorted(runs1.glob("*/report.html"))
+check("e2e: second run lists the first as an earlier run", len(found) == 2 and "Earlier runs" in found[-1].read_text(), len(found))
+cp = run_tool(["latest"], runs1)
+check("latest prints the newest folder", cp.stdout.strip() == str(found[-1].parent), cp.stdout)
+cp = run_tool(["report"], runs1)
+check("report subcommand re-renders", cp.returncode == 0 and cp.stdout.strip().endswith("report.html"), cp.stdout)
+
+# ---- Ctrl-C saves a partial result, and a second test cannot start meanwhile -------------------------
+runs2 = TMP / "e2e2"
+proc = subprocess.Popen([sys.executable, str(ROOT / "nettest.py"), "--duration", "120", "--iperf", "", "--ping", "ok=ok.test", "--tcp", "local=127.0.0.1:%d" % tcp_port],
+                        env=env_for(runs2), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True)
+for _ in range(50):
+    if (runs2 / "running.json").exists():
+        break
+    time.sleep(0.2)
+check("running.json appears while a test runs", (runs2 / "running.json").exists())
+cp = run_tool(["--duration", "10", "--iperf", "", "--ping", "ok=ok.test", "--no-tcp"], runs2)
+check("a second test is refused while one runs", cp.returncode == 4 and "already running" in cp.stdout, (cp.returncode, cp.stdout))
+time.sleep(4)
+proc.send_signal(signal.SIGINT)
+try:
+    out, _ = proc.communicate(timeout=30)
+except subprocess.TimeoutExpired:
+    proc.kill()
+    out, _ = proc.communicate()
+check("Ctrl-C ends the run promptly with a saved report", proc.returncode == 0 and "stopped early" in out, (proc.returncode, out[-300:]))
+f = sorted(runs2.glob("*/result.json"))
+if f:
+    res = json.loads(f[0].read_text())
+    check("partial result is marked and short", res["partial"] and res["sent"] < 20, (res["partial"], res["sent"]))
+else:
+    check("partial result saved", False)
+check("running.json removed afterwards", not (runs2 / "running.json").exists())
+
+# ---- a real iperf3 over loopback, if there is one --------------------------------------------------
+real = os.environ.get("NETTEST_REAL_IPERF3") or shutil.which("iperf3")
+if real:
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    server = subprocess.Popen([real, "-s", "-p", str(port), "--one-off"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    time.sleep(0.6)
+    runs3 = TMP / "e2e3"
+    cp = run_tool(["--duration", "8", "--iperf", "loop=127.0.0.1:%d" % port, "--ping", "", "--no-tcp"], runs3,
+                  extra={"TV_NETTEST_IPERF_BIN": real, "TV_NETTEST_PING_BIN": FAKEPING})
+    server.terminate()
+    found = sorted(runs3.glob("*/result.json"))
+    if found:
+        res = json.loads(found[0].read_text())
+        u = res["targets"][0]["udp"]
+        check("real iperf3: both directions measured", u and u["up"] and u["down"] and u["mode"] == "bidir", (u, cp.stdout[-400:]))
+        if u and u["up"] and u["down"]:
+            check("real iperf3: loopback is clean", u["up"]["loss_pct"] < 1 and u["down"]["loss_pct"] < 1 and (u["up"]["jitter_ms"] or 0) < 5, (u["up"], u["down"]))
+            check("real iperf3: one row per second, both directions", 6 <= len(u["intervals"]) <= 9 and all("up_jitter" in r and "down_jitter" in r for r in u["intervals"]), u["intervals"])
+        check("real iperf3: verdict good", res["targets"][0]["verdict"] == "GOOD", res["targets"][0].get("reasons"))
+    else:
+        check("real iperf3: run produced a result", False, cp.stdout[-500:])
+    cp = run_tool(["--duration", "6", "--iperf", "gone=127.0.0.1:%d" % port, "--ping", "", "--no-tcp"], TMP / "e2e4",
+                  extra={"TV_NETTEST_IPERF_BIN": real, "TV_NETTEST_PING_BIN": FAKEPING})
+    f = sorted((TMP / "e2e4").glob("*/result.json"))
+    r4 = json.loads(f[0].read_text()) if f else None
+    check("real iperf3: no server listening is a note, not a crash", r4 and any("iperf3:" in e for e in r4["targets"][0]["errors"]) and r4["targets"][0]["rtt"]["received"] == 6,
+          (r4 and r4["targets"][0]["errors"], cp.stdout[-300:]))
+else:
+    print("skip real iperf3 (not installed)")
+
+srv.close()
+shutil.rmtree(TMP, ignore_errors=True)
+print()
+if fails:
+    print("%d FAILED: %s" % (len(fails), ", ".join(fails)))
+    sys.exit(1)
+print("ALL PASSED")
