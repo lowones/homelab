@@ -53,6 +53,13 @@ browser window on the Mac pointed at `/display`. `POST /display/close` closes it
   Only today's row counts, so a reminder is written on
   the day it should appear. When the sheet cannot be fetched the last good copy keeps being used.
   Adding the next year's tab to `TV_ITINERARY` covers it.
+- **Private trip sheet (service account):** to stop sharing the sheet by link, make a Google service account, share the
+  sheet with its email as Viewer, put the downloaded JSON key somewhere only the mini can read it (for example
+  `rv-tv/.run/google-sa.json`, mode 600, never in git or `tv.env`) and add `TV_GOOGLE_KEY=<that path>` to `tv.env`, then
+  `bash install-tvserver.sh`. The server signs a short login with the key (using the Mac's `openssl`), gets a one-hour
+  token, and sends it only to Google hosts when it reads the trip tabs and the campgrounds tab. Without `TV_GOOGLE_KEY`
+  nothing changes. If Google refuses (sheet not shared with the account, key revoked) the dashboard keeps the last good
+  copy and `itinerary_error` in `/display/state` says why. Tests: `tests/test_google_auth.py`.
 - **Moon phase** at the right of the weather row (name, icon, percent lit). Worked out on the server
   from the date, so it needs no internet. `TV_MOON=off` hides it.
 - **Open sheet** button: `TV_SHEET_URL=<sheet link>` in `tv.env` shows that page fullscreen on the Mac

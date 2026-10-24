@@ -17,6 +17,7 @@ is the TV when the TV is on HDMI_1); POST /display/close removes it.
   TV_WEATHER_URL      weather API base (default Open-Meteo, no key needed)
 """
 import asyncio
+import base64
 import csv
 import datetime
 import io
@@ -31,7 +32,10 @@ import signal
 import ssl
 import subprocess
 import sys
+import tempfile
+import threading
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from contextlib import asynccontextmanager
@@ -757,13 +761,107 @@ def note_is_past_date(note, today):
     return d is not None and d < today
 
 
+# ---- Google service account (TV_GOOGLE_KEY) ------------------------------------------------------
+# With the trip sheet no longer shared by link, the mini reads it as a Google service account: it signs a
+# short JWT with the account's private key (using the system `openssl`, so no extra Python packages),
+# trades it for a one-hour access token, and sends that token as a Bearer header, but only to Google
+# hosts (also after a redirect). Nothing happens unless TV_GOOGLE_KEY points at the downloaded JSON key.
+GOOGLE_KEY_FILE = os.environ.get("TV_GOOGLE_KEY", "").strip()
+GOOGLE_SCOPE = "https://www.googleapis.com/auth/drive.readonly"
+GOOGLE_HOST_SUFFIXES = (".google.com", ".googleusercontent.com", ".googleapis.com")
+_gtoken = {"token": None, "exp": 0.0}
+_gtoken_lock = threading.Lock()
+
+
+def google_host(url):
+    host = (urllib.parse.urlparse(url).hostname or "").lower()
+    return any(host == suf[1:] or host.endswith(suf) for suf in GOOGLE_HOST_SUFFIXES)
+
+
+def _b64u(b):
+    return base64.urlsafe_b64encode(b).rstrip(b"=").decode()
+
+
+def google_service_account():
+    """The parsed key file, or None when TV_GOOGLE_KEY is not set."""
+    if not GOOGLE_KEY_FILE:
+        return None
+    try:
+        info = json.loads(Path(GOOGLE_KEY_FILE).read_text())
+        return {"email": info["client_email"], "key": info["private_key"],
+                "uri": info.get("token_uri") or "https://oauth2.googleapis.com/token"}
+    except Exception as e:
+        raise ValueError("cannot read the Google key %s: %s" % (GOOGLE_KEY_FILE, type(e).__name__)) from None
+
+
+def google_token():
+    """Blocking. A valid access token for the service account (cached for most of its hour), or None
+    when no key is configured."""
+    sa = google_service_account()
+    if sa is None:
+        return None
+    with _gtoken_lock:
+        now = time.time()
+        if _gtoken["token"] and now < _gtoken["exp"] - 300:
+            return _gtoken["token"]
+        head = _b64u(json.dumps({"alg": "RS256", "typ": "JWT"}).encode())
+        claims = _b64u(json.dumps({"iss": sa["email"], "scope": GOOGLE_SCOPE, "aud": sa["uri"],
+                                   "iat": int(now), "exp": int(now) + 3600}).encode())
+        signing_input = (head + "." + claims).encode()
+        openssl = shutil.which("openssl") or "/usr/bin/openssl"
+        with tempfile.NamedTemporaryFile("w", suffix=".pem") as kf:          # created 0600, removed on close
+            kf.write(sa["key"])
+            kf.flush()
+            out = subprocess.run([openssl, "dgst", "-sha256", "-sign", kf.name], input=signing_input,
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=15)
+        if out.returncode != 0 or not out.stdout:
+            raise ValueError("openssl could not sign the Google login: " + out.stderr.decode("utf-8", "replace").strip()[:150])
+        assertion = head + "." + claims + "." + _b64u(out.stdout)
+        body = urllib.parse.urlencode({"grant_type": "urn:ietf:params:oauth:grant-type:jwt-bearer",
+                                       "assertion": assertion}).encode()
+        try:
+            with urllib.request.urlopen(urllib.request.Request(sa["uri"], data=body, headers={"User-Agent": "rv-tv"}),
+                                        timeout=15) as r:
+                got = json.loads(r.read().decode("utf-8", "replace"))
+        except urllib.error.HTTPError as e:
+            raise ValueError("Google refused the service account login (HTTP %d): is the key still valid?" % e.code) from None
+        if not got.get("access_token"):
+            raise ValueError("Google sent no access token")
+        _gtoken["token"] = got["access_token"]
+        _gtoken["exp"] = now + float(got.get("expires_in", 3600))
+        log.info("google service account token ok (%s)", sa["email"])
+        return _gtoken["token"]
+
+
+class _GoogleOnlyRedirect(urllib.request.HTTPRedirectHandler):
+    """Keeps the Bearer header only while the redirect stays on a Google host."""
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        new = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if new is not None and not google_host(newurl):
+            new.headers.pop("Authorization", None)
+            new.unredirected_hdrs.pop("Authorization", None)
+        return new
+
+
 def read_source(src):
     if src.startswith(("http://", "https://")):
-        req = urllib.request.Request(src, headers={"User-Agent": "rv-tv"})
-        with urllib.request.urlopen(req, timeout=10) as r:
-            text = r.read().decode("utf-8", "replace")
+        headers = {"User-Agent": "rv-tv"}
+        token = google_token() if google_host(src) else None
+        if token:
+            headers["Authorization"] = "Bearer " + token
+        opener = urllib.request.build_opener(_GoogleOnlyRedirect)
+        try:
+            with opener.open(urllib.request.Request(src, headers=headers), timeout=10) as r:
+                text = r.read().decode("utf-8", "replace")
+        except urllib.error.HTTPError as e:
+            if token and e.code in (401, 403, 404):
+                sa = google_service_account()
+                raise ValueError("Google answered %d for the sheet: share it with %s (Viewer)" % (e.code, sa["email"])) from None
+            raise
         if text.lstrip()[:1] == "<":       # an HTML page: Google wants a sign-in
-            raise ValueError("got a web page instead of CSV; share the sheet as 'anyone with the link can view'")
+            raise ValueError("got a web page instead of CSV; " + (
+                "share the sheet with the service account" if token else
+                "share the sheet as 'anyone with the link can view', or set TV_GOOGLE_KEY"))
         return text
     return Path(src).read_text()
 
