@@ -143,6 +143,41 @@ report, `latest` prints the newest folder, `--duration 60` shortens the test, Ct
 - Checks: `python3 tests/test_nettest.py` (about 40 s; uses stand-in `tests/fakeping.py` and `fakeiperf.py`, and a
   real iperf3 over loopback when one is installed; the fixtures in `tests/fixtures/` are real iperf3 3.22 output).
 
+## Offline stop log and Prep for move
+- **Stop log that survives no signal.** The phone's `Car Parked` / `Car Driving` shortcuts no longer call the mini
+  directly: each event is saved as a small file on the phone (`park|2026-10-24T14:03:11-07:00|45.93|-123.96`), and an
+  `Upload Stops` shortcut posts the files to `POST /display/stop` whenever it has a connection and deletes each one only
+  when the reply has `"ok": true`. A failed upload leaves the file for the next try. Step by step: `PHONE-SHORTCUTS.md`.
+- **Events carry their own time (`at`).** A stay is measured from the park time to the drive time, however late the
+  upload arrives. The body may be JSON (one object or a list) or plain `event|time|lat|lon` lines, with any content
+  type; the old query form (`?event=park&lat=&lon=`, optional `&at=`) still works. Events are applied in time order,
+  a re-sent event is acknowledged as a `duplicate`, one older than the newest applied is `skipped`, and unusable data is
+  `dropped` with a reason. All three answer `"ok": true` so the phone stops resending them. A body that is not JSON or
+  lines answers 400 (no `ok`): the phone keeps the file and Tools shows the problem. The 90 min and 36 h rules, and
+  "parked within 300 m of the RV is ignored", all use event time.
+- **Where the Mac was, not where it is.** `locationagent.sh` also appends each fix to `.run/location_history.log`
+  (`epoch|lat|lon|accuracy`, about two weeks). A park is compared with the Mac's fix nearest its time (within 45 min).
+  With no such fix, an event under 3 h old falls back to the current fix and an older one counts as not at the RV
+  (the tent pin outranks a white stop pin at a campground anyway).
+- **Tools shows the log:** `GET /tools/stops/status` (`display`): last upload, newest event, car parked since, last problem.
+- **Tools > Prep for move** (two taps) makes the Mac safe for a power cut, with the Mac still running. The server texts
+  your friend the usual destination message (once a day per destination, `TV_TEXT_MODE` applies), turns the TV off and
+  closes the dashboard, then starts `prepmove.py` as its own one-shot launchd job (`com.lowone.prepmove`, so it outlives
+  the service it stops). That stops the `com.lowone.camtunnel`, `tvlocation` and `tvserver` agents (`launchctl bootout`: this
+  session only, they load again at the next login), quits every app with a window or menu-bar icon except Finder,
+  Tailscale and system UI (polite quit, then SIGTERM, never SIGKILL), texts `TV_TEXT_SELF` "ready" with the apps that
+  would not quit and the Apple Maps driving link to the next stop, quits Messages last, and runs `sync`. The reverse
+  tunnel daemon, Tailscale and sshd stay up. The phone page goes quiet when the service stops; the text is the answer.
+  `Test the prep (changes nothing)` does the listing only and shows the result on the Tools page.
+- **Settings in `tv.env`:** `TV_TEXT_SELF=+1...` (who gets the ready text; comma-separated), `TV_PREP_KEEP=App One, App Two`
+  (more apps to leave open), `TV_PREPMOVE=off` (switch it off; `run-dev.sh` does).
+- **By hand:** `./tv prepmove --dry-run` lists what it would quit and stop. `./tv prepmove --resume` loads the three
+  agents again (for when you prepped and then did not cut the power; it needs ssh, since the phone page is gone). A real
+  run is only started from the phone, because it would quit the terminal you type in. Report: `.run/prepmove-report.json`,
+  log: `.run/prepmove.log`.
+- Checks: `python3 tests/test_stops_batch.py` and `python3 tests/test_prepmove.py` (no network; stand-in osascript,
+  launchctl and apps). They are not part of `smoke.sh`.
+
 ## Workflow
 1. `git switch -c my-feature`
 2. Edit, then `bash tests/smoke.sh` (must print ALL PASSED)

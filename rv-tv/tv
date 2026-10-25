@@ -6,9 +6,11 @@
 #        tv mute on|off | app youtube.leanback.v4
 #        tv display open|close|state | tv sheet | tv place "Moab, Utah" | tv place auto
 #        tv nettest [--duration 60]   10-minute network test for video calls (see README)
+#        tv prepmove --dry-run | --resume   what Tools > Prep for move would quit; load the stopped agents again
 set -euo pipefail
 ENVF="${TV_ENV:-$(cd "$(dirname "$0")" && pwd)/tv.env}"
 if [ -f "$ENVF" ]; then set -a; . "$ENVF"; set +a; fi
+if [ "${1:-}" = prepmove ]; then shift; exec python3 "$(cd "$(dirname "$0")" && pwd)/prepmove.py" "$@"; fi   # runs locally, needs no token
 if [ "${1:-}" = nettest ]; then shift; exec python3 "$(cd "$(dirname "$0")" && pwd)/nettest.py" "$@"; fi   # runs locally, needs no token
 URL="${TV_URL:-http://${TV_BIND:-127.0.0.1}:${TV_SERVER_PORT:-8780}}"
 TOKEN="${TV_TOKEN:?TV_TOKEN not set (no tv.env found)}"
@@ -29,5 +31,5 @@ case "${1:-}" in
   display) case "${2:-}" in open|close) req POST "/display/$2" ;; state) req GET /display/state ;; *) echo "usage: tv display open|close|state"; exit 1 ;; esac ;;
   place)   [ "${2:-}" = auto ] && { req POST "/display/location?auto=true"; exit; }
            req POST "/display/location?place=$(python3 -c 'import sys,urllib.parse as u;print(u.quote(sys.argv[1]))' "${2:?e.g. \"Moab, Utah\"}")" ;;
-  *) sed -n '2,8p' "$0"; exit 1 ;;
+  *) sed -n '2,9p' "$0"; exit 1 ;;
 esac

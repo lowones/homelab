@@ -42,7 +42,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 import websockets
-from fastapi import Depends, FastAPI, Header, HTTPException, Path as PathParam, Query
+from fastapi import Depends, FastAPI, Header, HTTPException, Path as PathParam, Query, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 try:  # newer wakeonlan releases renamed the function
@@ -1670,6 +1670,9 @@ CAMPS_URL = os.environ.get("TV_CAMPS_URL", "").strip()          # a CSV link; de
 STOP_MIN_MIN = float(os.environ.get("TV_STOP_MINUTES", "90"))     # parked at least this long to count
 STOP_HOME_M = float(os.environ.get("TV_STOP_HOME_M", "300"))      # parking this close to the Mac does not count
 STOPS_FILE = RUN_DIR / "stops.json"
+LOCATION_HISTORY_FILE = Path(os.environ.get("TV_LOCATION_HISTORY") or LOCATION_FILE.with_name("location_history.log"))
+STOP_MAX_AGE_DAYS = 60      # an uploaded event older than this is dropped
+STOP_FUTURE_SLACK = 300     # seconds: a phone clock this far ahead is clamped to now
 CAMP_GEO_FILE = RUN_DIR / "camp_geocache.json"
 ROADS_MAX_POINTS = 30000
 _roads_bg = BgCache("roads", ok_ttl=24 * 3600, fail_ttl=300)
@@ -1934,15 +1937,20 @@ async def get_camps():
 
 
 # -- parked-car stops -----------------------------------------------------------------------
+# The phone saves each "car parked" / "driving again" as a small file (event, time, place) and uploads the
+# files whenever it has a connection, maybe hours later. So every event carries its OWN time (`at`), and
+# everything below judges a stay by event time, never by when the upload happened to arrive.
 _stops_lock = threading.Lock()
 
 
 def _stops_read():
     try:
         d = json.loads(STOPS_FILE.read_text())
-        return {"pending": d.get("pending"), "stops": list(d.get("stops") or [])}
-    except (OSError, ValueError, AttributeError):
-        return {"pending": None, "stops": []}
+        return {"pending": d.get("pending"), "stops": list(d.get("stops") or []), "seen": list(d.get("seen") or []),
+                "last_at": float(d.get("last_at") or 0), "last_upload": d.get("last_upload"),
+                "last_error": d.get("last_error")}
+    except (OSError, ValueError, AttributeError, TypeError):
+        return {"pending": None, "stops": [], "seen": [], "last_at": 0.0, "last_upload": None, "last_error": None}
 
 
 def _stops_write(d):
@@ -1965,37 +1973,202 @@ def _mac_fix():
     return {"lat": lat, "lon": lon} if age <= DEVICE_MAX_AGE else None
 
 
-def stop_event(event, lat, lon):
-    """Blocking. 'park': the phone left the car at (lat, lon). 'drive': it is back in the car. A stay of
-    STOP_MIN_MIN or more is saved; parking next to the Mac (the RV) is ignored."""
-    now = time.time()
+def _mac_fix_at(t):
+    """Where the Mac was around time t. The location agent logs a fix every 10 minutes
+    (location_history.log): the nearest one within 45 minutes wins. Without one, a recent event falls
+    back to the current fix (the old behaviour); an older one gets None, so it is never mistaken
+    for 'parked at the RV'."""
+    best = None
+    try:
+        lines = LOCATION_HISTORY_FILE.read_text().splitlines()[-3000:]
+    except OSError:
+        lines = []
+    for ln in lines:
+        parts = ln.split("|")
+        try:
+            ts, la, lo = float(parts[0]), float(parts[1]), float(parts[2])
+        except (ValueError, IndexError):
+            continue
+        gap = abs(ts - t)
+        if gap <= 45 * 60 and (best is None or gap < best[0]):
+            best = (gap, la, lo)
+    if best:
+        return {"lat": best[1], "lon": best[2]}
+    return _mac_fix() if time.time() - t <= 3 * 3600 else None
+
+
+def parse_event_time(v):
+    """Epoch seconds for the phone's time stamp, or None. Accepts ISO 8601 with an offset
+    ('2026-10-24T14:03:11-07:00', '...Z', '...-0700'), the same without one (read as the Mac's local
+    time) and plain epoch seconds or milliseconds."""
+    if v is None or isinstance(v, bool):
+        return None
+    if isinstance(v, (int, float)):
+        t = float(v)
+        return t / 1000.0 if t > 1e11 else t
+    t = str(v).strip()
+    if not t:
+        return None
+    if re.fullmatch(r"\d{9,13}(\.\d+)?", t):
+        n = float(t)
+        return n / 1000.0 if n > 1e11 else n
+    t = re.sub(r"[zZ]$", "+00:00", t)
+    t = re.sub(r"([+-]\d{2})(\d{2})$", r"\1:\2", t)
+    t = re.sub(r"\.(\d+)", lambda m: "." + (m.group(1) + "000000")[:6], t, count=1)
+    try:
+        dt = datetime.datetime.fromisoformat(t.replace("/", "-"))
+    except ValueError:
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M"):
+            try:
+                dt = datetime.datetime.strptime(t, fmt)
+                break
+            except ValueError:
+                dt = None
+        if dt is None:
+            return None
+    try:
+        return dt.timestamp()
+    except (OverflowError, OSError, ValueError):
+        return None
+
+
+def _num(v):
+    """A latitude/longitude from a number or text ('45,99' with a decimal comma too), else None."""
+    if v is None or isinstance(v, bool):
+        return None
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        pass
+    try:
+        t = str(v).strip()
+        return float(t.replace(",", ".")) if t.count(",") == 1 and "." not in t else None
+    except ValueError:
+        return None
+
+
+def parse_stop_lines(text):
+    """The phone's plain-text form, one event per line: 'park|2026-10-24T14:03:11-07:00|45.93|-123.96' or
+    'drive|2026-10-24T16:10:00-07:00'. No quotes to mangle (iOS turns typed quotes into curly ones).
+    Returns a list of event dicts, or None when a line does not look like one."""
+    events = []
+    for ln in text.splitlines():
+        ln = ln.strip().strip("\ufeff")
+        if not ln:
+            continue
+        parts = [x.strip() for x in ln.split("|")]
+        if parts[0].lower() not in ("park", "drive") or len(parts) > 4:
+            return None
+        e = {"event": parts[0], "at": parts[1] if len(parts) > 1 else None}
+        if len(parts) > 2:
+            e["lat"] = parts[2]
+        if len(parts) > 3:
+            e["lon"] = parts[3]
+        events.append(e)
+    return events or None
+
+
+def _stop_prepare(raw, now):
+    """One uploaded event -> (event dict, None) or (None, why it cannot be used). Bad data is a
+    permanent problem: retrying the same file will never fix it, so the caller drops it."""
+    if not isinstance(raw, dict):
+        return None, "not an event"
+    ev = str(raw.get("event") or "").strip().lower()
+    if ev not in ("park", "drive"):
+        return None, "event must be park or drive"
+    at, note = parse_event_time(raw.get("at")), None
+    stamped = at is not None            # only a time the phone gave can be a re-send; an arrival time cannot
+    if at is None:
+        at, note = now, ("no usable time, used the arrival time" if raw.get("at") not in (None, "") else None)
+    if at > now + STOP_FUTURE_SLACK:
+        at, note, stamped = now, "time was in the future, used the arrival time", False
+    if at < now - STOP_MAX_AGE_DAYS * 86400:
+        return None, "older than %d days" % STOP_MAX_AGE_DAYS
+    lat, lon = _num(raw.get("lat")), _num(raw.get("lon"))
+    if ev == "park" and (lat is None or lon is None or not (-90 <= lat <= 90) or not (-180 <= lon <= 180)):
+        return None, "park needs a valid lat and lon"
+    return {"event": ev, "at": at, "lat": lat, "lon": lon, "note": note, "stamped": stamped}, None
+
+
+def _stop_apply(d, ev):
+    """One event in time order against the saved state. Returns the result for the phone."""
+    at, pend = ev["at"], d["pending"]
+    if ev["event"] == "park":
+        here = _mac_fix_at(at)
+        at_home = bool(here) and _km(here, {"lat": ev["lat"], "lon": ev["lon"]}) * 1000 < STOP_HOME_M
+        d["pending"] = None if at_home else {"lat": round(ev["lat"], 5), "lon": round(ev["lon"], 5), "at": at}
+        return {"event": "park", "tracking": not at_home, "note": "at the RV, ignored" if at_home else None}
+    if pend and at - pend["at"] > 36 * 3600:        # a park the drive never answered
+        pend = d["pending"] = None
+    if not pend:
+        return {"event": "drive", "logged": False, "note": "no parked car on record"}
+    mins = (at - pend["at"]) / 60.0
+    d["pending"] = None
+    logged = mins >= STOP_MIN_MIN
+    if logged:
+        for s_ in d["stops"]:
+            if _km(s_, pend) < 0.1:                  # the same place again: one pin, newest visit
+                s_.update(at=pend["at"], mins=round(mins), n=s_.get("n", 1) + 1)
+                break
+        else:
+            d["stops"].append({"lat": pend["lat"], "lon": pend["lon"], "at": pend["at"],
+                               "mins": round(mins), "n": 1})
+        d["stops"] = d["stops"][-500:]
+    return {"event": "drive", "logged": logged, "minutes": round(mins)}
+
+
+def stops_ingest(events, now=None):
+    """Blocking. Takes uploaded events (dicts with event, at, lat, lon) in any order and applies them
+    in time order. Safe to send twice: an event already seen is acknowledged and ignored, and one older
+    than the newest event already applied is skipped. Every result carries ok=True when the phone may
+    delete its copy (applied, duplicate, stale, or permanently unusable)."""
+    now = time.time() if now is None else now
+    prepared, results = [], [None] * len(events)
+    for i, raw in enumerate(events):
+        ev, why = _stop_prepare(raw, now)
+        if ev is None:
+            log.warning("stops: dropped an event (%s): %.120r", why, raw)
+            results[i] = {"ok": True, "dropped": why}
+        else:
+            prepared.append((ev["at"], i, ev))
+    prepared.sort(key=lambda x: (x[0], x[1]))
     with _stops_lock:
         d = _stops_read()
-        pend = d["pending"]
-        if pend and now - pend["at"] > 36 * 3600:
-            pend = d["pending"] = None
-        if event == "park":
-            here = _mac_fix()
-            at_home = here and _km(here, {"lat": lat, "lon": lon}) * 1000 < STOP_HOME_M
-            d["pending"] = None if at_home else {"lat": round(lat, 5), "lon": round(lon, 5), "at": now}
-            _stops_write(d)
-            return {"event": "park", "tracking": not at_home, "note": "at the RV, ignored" if at_home else None}
-        if not pend:
-            return {"event": "drive", "logged": False, "note": "no parked car on record"}
-        mins = (now - pend["at"]) / 60.0
-        d["pending"] = None
-        logged = mins >= STOP_MIN_MIN
-        if logged:
-            for s_ in d["stops"]:
-                if _km(s_, pend) < 0.1:                  # the same place again: one pin, newest visit
-                    s_.update(at=pend["at"], mins=round(mins), n=s_.get("n", 1) + 1)
-                    break
+        seen = d["seen"]
+        for _at, i, ev in prepared:
+            key = "%s|%d" % (ev["event"], int(ev["at"]))
+            if ev["stamped"] and key in seen:
+                results[i] = {"ok": True, "event": ev["event"], "duplicate": True}
+            elif ev["stamped"] and ev["at"] < d["last_at"]:
+                results[i] = {"ok": True, "event": ev["event"], "skipped": "older than an event already applied"}
             else:
-                d["stops"].append({"lat": pend["lat"], "lon": pend["lon"], "at": pend["at"],
-                                   "mins": round(mins), "n": 1})
-            d["stops"] = d["stops"][-500:]
+                res = _stop_apply(d, ev)
+                res["ok"] = True
+                if ev["note"]:
+                    res["time_note"] = ev["note"]
+                if ev["stamped"]:
+                    seen.append(key)
+                    d["last_at"] = max(d["last_at"], ev["at"])
+                results[i] = res
+        d["seen"] = seen[-400:]
+        applied = sum(1 for r in results if r and "duplicate" not in r and "skipped" not in r and "dropped" not in r)
+        d["last_upload"] = {"at": now, "received": len(events), "applied": applied,
+                            "newest": max([e[0] for e in prepared], default=None)}
+        d["last_error"] = None
         _stops_write(d)
-        return {"event": "drive", "logged": logged, "minutes": round(mins)}
+    return results
+
+
+def stop_event(event, lat, lon, at=None):
+    """One event, as the old shortcuts send it (no `at`: now). Kept for them and for the tests."""
+    return stops_ingest([{"event": event, "lat": lat, "lon": lon, "at": at}])[0]
+
+
+def stops_note_error(msg):
+    with _stops_lock:
+        d = _stops_read()
+        d["last_error"] = {"at": time.time(), "msg": msg[:200]}
+        _stops_write(d)
 
 
 async def get_stops():
@@ -2004,15 +2177,53 @@ async def get_stops():
 
 
 @app.post("/display/stop")
-async def stop_endpoint(event: str = Query(..., pattern="^(park|drive)$"),
+async def stop_endpoint(request: Request, event: str = Query(None, pattern="^(park|drive)$"),
                         lat: float = Query(None, ge=-90, le=90), lon: float = Query(None, ge=-180, le=180),
-                        who: Who = Depends(need("stops"))):
-    """The phone's Bluetooth automation: event=park&lat=..&lon=.. when it leaves the car, event=drive when it
-    is back. Needs a token with the 'stops' action (tvserver.py token add NAME --stops)."""
+                        at: str = Query(None), who: Who = Depends(need("stops"))):
+    """The phone's parking automation. One event in the query (event=park&lat=..&lon=..[&at=<time>]) or in
+    the body: JSON (one object {"event","at","lat","lon"} or a list of them) or plain lines like
+    park|2026-10-24T14:03:11-07:00|45.93|-123.96 (one event per line), whatever the content type.
+    The reply has "ok": true when the phone may delete its copy. Needs a token with the 'stops' action
+    (tvserver.py token add NAME --stops)."""
+    raw = await request.body()
+    if len(raw) > 200000:
+        raise HTTPException(413, "too much data")
+    loop = asyncio.get_running_loop()
+    if raw.strip():
+        try:
+            text = raw.decode("utf-8-sig")
+            try:
+                body = json.loads(text)
+            except ValueError:
+                body = parse_stop_lines(text)          # 'park|time|lat|lon' lines
+                if body is None:
+                    raise ValueError("neither JSON nor park|time|lat|lon lines")
+                if len(body) == 1:
+                    body = body[0]
+        except (ValueError, UnicodeDecodeError):
+            await loop.run_in_executor(None, stops_note_error, "the body was not JSON or park|time|lat|lon lines (%d bytes)" % len(raw))
+            raise HTTPException(400, "the body is not JSON or park|time|lat|lon lines")
+        events = body if isinstance(body, list) else [body]
+        if len(events) > 500:
+            raise HTTPException(413, "at most 500 events at a time")
+        results = await loop.run_in_executor(None, stops_ingest, events)
+        if isinstance(body, list):
+            return {"ok": True, "received": len(events), "results": results}
+        return results[0]
+    if event is None:
+        raise HTTPException(400, "send event=park|drive in the query or a JSON body")
     if event == "park" and (lat is None or lon is None):
         raise HTTPException(400, "park needs lat and lon")
-    return await asyncio.get_running_loop().run_in_executor(None, stop_event, event, lat, lon)
+    return (await loop.run_in_executor(None, stops_ingest, [{"event": event, "lat": lat, "lon": lon, "at": at}]))[0]
 
+
+@app.get("/tools/stops/status")
+async def stops_status(who: Who = Depends(need("display"))):
+    """What the Tools page shows about the phone's stop log."""
+    d = _stops_read()
+    p = d["pending"]
+    return {"last_upload": d["last_upload"], "last_error": d["last_error"], "last_event_at": d["last_at"] or None,
+            "parked_since": p["at"] if p else None, "stops": len(d["stops"]), "now": time.time()}
 
 
 async def _soft(coro, what):
@@ -2610,6 +2821,122 @@ async def copy_address(who: Who = Depends(need("display"))):
     return res
 
 
+# ---- Tools > Prep for move: make the Mac safe for a power cut ---------------------------------------
+# The mini is unplugged with the Mac still running, so everything that could be writing to disk is
+# stopped first: the TV goes off, the destination is texted, then prepmove.py (its own one-shot launchd
+# job, because it has to outlive this service) stops the RV TV agents, quits every app, texts "ready"
+# with the apps that would not quit and the Apple Maps link, and syncs. Tailscale, the reverse tunnel and
+# sshd stay up. TV_PREPMOVE=off disables it (run-dev.sh does, so a dev copy can never quit your apps).
+TEXT_SELF = [x.strip() for x in os.environ.get("TV_TEXT_SELF", "").split(",") if x.strip()]
+IS_MAC = sys.platform == "darwin"
+PREP_ON = os.environ.get("TV_PREPMOVE", "on").strip().lower() not in ("off", "0", "no", "false")
+PREP_KEEP = [x.strip() for x in os.environ.get("TV_PREP_KEEP", "").split(",") if x.strip()]   # more app names to leave open
+PREP_JOB = "com.lowone.prepmove"
+_prep = {"running": False, "started": 0.0, "task": None}
+
+
+def prep_report():
+    try:
+        return json.loads((RUN_DIR / "prepmove-report.json").read_text())
+    except (OSError, ValueError):
+        return None
+
+
+def prep_spawn(plan):
+    """Blocking. Writes the plan and starts prepmove.py as a one-shot launchd job named com.lowone.prepmove;
+    where launchd refuses (not a login session), a detached process does the same work."""
+    RUN_DIR.mkdir(parents=True, exist_ok=True)
+    plan_file = RUN_DIR / "prepmove-plan.json"
+    fd = os.open(str(plan_file), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        json.dump(plan, f)
+    args = [sys.executable, str(BASE / "prepmove.py"), "--plan", str(plan_file)]
+    logf = str(RUN_DIR / "prepmove.log")
+    plist = RUN_DIR / (PREP_JOB + ".plist")
+    plist.write_text("""<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>Label</key><string>%s</string>
+<key>ProgramArguments</key><array>%s</array>
+<key>WorkingDirectory</key><string>%s</string>
+<key>RunAtLoad</key><true/>
+<key>StandardOutPath</key><string>%s</string>
+<key>StandardErrorPath</key><string>%s</string>
+</dict></plist>
+""" % (PREP_JOB, "".join("<string>%s</string>" % a.replace("&", "&amp;").replace("<", "&lt;") for a in args),
+       BASE, logf, logf))
+    dom = "gui/%d" % os.getuid()
+    subprocess.run(["launchctl", "bootout", "%s/%s" % (dom, PREP_JOB)], capture_output=True, timeout=15)
+    r = subprocess.run(["launchctl", "bootstrap", dom, str(plist)], capture_output=True, text=True, timeout=15)
+    if r.returncode == 0:
+        return "launchd"
+    log.warning("prepmove: launchctl bootstrap failed (%s); starting it detached instead", (r.stderr or "").strip()[:100])
+    with open(logf, "ab") as lf:
+        subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=lf, stderr=lf, cwd=str(BASE), start_new_session=True)
+    return "detached"
+
+
+async def prep_flow(dry_run):
+    """The part that needs this service (the TV, the nav data, the friend text); the rest is prepmove.py."""
+    loop = asyncio.get_running_loop()
+    warnings = []
+    try:
+        friend = None
+        if not dry_run:
+            try:
+                friend = await text_destination()       # the usual rule: once a day per destination, TV_TEXT_MODE applies
+            except Exception as e:
+                warnings.append("The text to your friend failed: %s" % str(e)[:100])
+        body = None
+        try:
+            nav = await get_nav()
+            t = (nav or {}).get("target") or {}
+            if t.get("address") or t.get("label"):
+                body = text_body(nav)
+        except Exception as e:
+            warnings.append("No destination in the text (%s)." % str(e)[:80])
+        if not dry_run:
+            try:
+                await call("ssap://system/turnOff", expect_close=True)
+            except Exception as e:
+                warnings.append("TV did not confirm power off (%s)." % (str(e)[:60] or "unreachable"))
+            await loop.run_in_executor(None, kiosk_stop)
+            if friend and friend.get("sent"):
+                await asyncio.sleep(10)                  # let iMessage hand the text over before apps start closing
+        plan = {"dry_run": dry_run, "self_to": TEXT_SELF, "destination_text": body, "warnings": warnings,
+                "imessage_script": IMESSAGE_SCRIPT, "keep_extra": PREP_KEEP}
+        how = await loop.run_in_executor(None, prep_spawn, plan)
+        log.info("prepmove: %s started (%s)%s", "dry run" if dry_run else "run", how,
+                 "; friend text: %s" % (friend if friend else "none"))
+    except Exception:
+        log.exception("prepmove failed before the helper started")
+    finally:
+        _prep["running"] = False
+
+
+@app.post("/tools/prepmove/start")
+async def prepmove_start(dry_run: bool = Query(False), who: Who = Depends(need("display"))):
+    """Starts the prep. dry_run=1 only lists what would be quit and stopped. The reply comes first; for a real run
+    this service stops about a minute later, so the phone page cannot show the end: the ready text does."""
+    if not PREP_ON:
+        raise HTTPException(501, "Prep for move is switched off here (TV_PREPMOVE=off).")
+    if not IS_MAC:
+        raise HTTPException(501, "Prep for move only works on the Mac.")
+    if _prep["running"] and time.time() - _prep["started"] < 300:
+        raise HTTPException(409, "Already prepping.")
+    _prep.update(running=True, started=time.time())
+    _prep["task"] = asyncio.get_running_loop().create_task(prep_flow(dry_run))      # kept so it is not collected
+    log.info("%s: prepmove %s", who.name, "dry run" if dry_run else "START")
+    return {"started": True, "dry_run": dry_run, "text_to_you": bool(TEXT_SELF), "text_to_friend": bool(TEXT_TO),
+            "tv_off": not dry_run}
+
+
+@app.get("/tools/prepmove/status")
+async def prepmove_status(who: Who = Depends(need("display"))):
+    return {"enabled": PREP_ON and IS_MAC, "running": _prep["running"], "report": prep_report(),
+            "text_to_you": bool(TEXT_SELF), "now": time.time()}
+
+
 class FreshStatic(StaticFiles):
     """Display files are revalidated on every load (cheap: the ETag answers 304), so a changed widget
     reaches the kiosk at once instead of whenever Chrome decides its cached copy has expired."""
@@ -2750,6 +3077,16 @@ form button{padding:12px 14px}
  <button class="wide" data-act="display" onclick="view('nettest')">Network test</button>
 </div>
 <div class="grid">
+ <button id="pm-go" class="wide" data-act="display" onclick="pmTap()">Prep for move</button>
+</div>
+<div class="grid">
+ <button class="wide" data-act="display" onclick="pmRun(true)">Test the prep (changes nothing)</button>
+</div>
+<div class="res" id="tl-info">
+ <div class="sub" id="tl-stops"></div>
+ <div class="sub" id="tl-prep"></div>
+</div>
+<div class="grid">
  <button class="wide" data-act="display" onclick="home()">Home</button>
 </div>
 </div>
@@ -2857,10 +3194,72 @@ function view(v){
   if(ntTimer){clearInterval(ntTimer);ntTimer=null}
   if(v==='cam')show('BatCam: press Login if the cameras say 401, then Load.');
   else if(v==='canny'){show('Canny: pick a camera.');loadCams()}
-  else if(v==='tools')show('Tools');
+  else if(v==='tools'){show('Tools');toolsInfo()}
   else if(v==='nettest'){ntRefresh();ntTimer=setInterval(ntRefresh,3000)}
   else if(v==='report'){}
   else refresh();
+}
+function ago(t,now){
+  var s=Math.max(0,Math.round((now||Date.now()/1000)-t));
+  if(s<90)return 'just now';
+  if(s<5400)return Math.round(s/60)+' min ago';
+  if(s<172800)return Math.round(s/3600)+' h ago';
+  return Math.round(s/86400)+' days ago';
+}
+async function toolsInfo(){
+  var a=document.getElementById('tl-stops'),b=document.getElementById('tl-prep');
+  a.textContent='';b.textContent='';
+  try{
+    var r=await api('GET','/tools/stops/status');
+    if(r.ok){
+      var j=r.j,t=[];
+      t.push(j.last_upload?'Stop log: last upload '+ago(j.last_upload.at,j.now)+' ('+j.last_upload.applied+' new)':'Stop log: nothing uploaded yet');
+      if(j.parked_since)t.push('car parked since '+ago(j.parked_since,j.now));
+      if(j.last_error)t.push('last problem: '+j.last_error.msg+' ('+ago(j.last_error.at,j.now)+')');
+      a.textContent=t.join('. ')+'.';
+    }
+    var q=await api('GET','/tools/prepmove/status');
+    if(q.ok){
+      var p=q.j,rep=p.report,u=[];
+      if(!p.enabled)u.push('Prep for move is not available on this copy.');
+      else{
+        if(rep){
+          u.push((rep.dry_run?'Last test ':'Last prep ')+ago(rep.at,p.now)+': '+(rep.dry_run?'would quit ':'quit ')+(rep.quit.length)+' app(s)'
+            +(rep.refused.length?', would not quit: '+rep.refused.join(', '):'')+'.');
+          if(rep.dry_run&&rep.quit.length)u.push('Would quit: '+rep.quit.join(', ')+'.');
+        }
+        if(!p.text_to_you)u.push('No TV_TEXT_SELF in tv.env, so the ready text will not reach you.');
+      }
+      b.textContent=u.join(' ');
+    }
+  }catch(e){}
+}
+var PM={armed:false,timer:null};
+function pmReset(){
+  PM.armed=false;if(PM.timer){clearTimeout(PM.timer);PM.timer=null}
+  var b=document.getElementById('pm-go');b.textContent='Prep for move';b.classList.remove('on');
+}
+function pmTap(){
+  if(!PM.armed){
+    PM.armed=true;
+    var b=document.getElementById('pm-go');b.textContent='Tap again to confirm (10 s)';b.classList.add('on');
+    PM.timer=setTimeout(function(){pmReset();show('Prep cancelled.')},10000);
+    show('This turns the TV off, quits every app and stops the RV TV service on the mini.');
+    return;
+  }
+  pmReset();pmRun(false);
+}
+async function pmRun(dry){
+  show(dry?'Testing the prep...':'Starting the prep...');
+  try{
+    var r=await api('POST','/tools/prepmove/start'+(dry?'?dry_run=1':''));
+    if(r.status==401){show('This link is not valid any more. Ask Devon for a new one.');return}
+    if(r.status==403){show('Not allowed for your link.');return}
+    if(r.status==409){show('Already prepping.');return}
+    if(!r.ok){show('Could not start: '+(r.j.detail||r.status));return}
+    if(dry){show('Testing. Results show here in about 30 seconds.');setTimeout(toolsInfo,20000);setTimeout(toolsInfo,40000)}
+    else show('Prepping. This page goes quiet in about a minute'+(r.j.text_to_you?', then you get a text when the mini is ready.':'. No TV_TEXT_SELF is set, so no text will come: wait 2 minutes before cutting power.'));
+  }catch(e){show('Cannot reach the TV box. Are you on the RV Wi-Fi?')}
 }
 function ntClock(s){s=Math.max(0,Math.round(s));return Math.floor(s/60)+':'+('0'+(s%60)).slice(-2)}
 var NTICON=['✓','▲','✕'];

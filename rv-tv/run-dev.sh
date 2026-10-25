@@ -9,6 +9,7 @@ cd "$(dirname "$0")"
 PY=.venv/bin/python
 mkdir -p .run
 export TV_ENV_FILE="$PWD/tv.dev.env" TV_TOKENS_FILE="$PWD/tokens.dev.json"
+export TV_PREPMOVE=off   # a dev copy must never quit apps or stop services (Tools > Prep for move)
 if [ ! -f tv.dev.env ]; then
   echo "TV_TOKEN=devtoken-$(openssl rand -hex 8)" > tv.dev.env
   echo "TV_BIND=127.0.0.1" >> tv.dev.env
