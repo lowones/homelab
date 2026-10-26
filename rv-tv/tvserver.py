@@ -2524,6 +2524,7 @@ def nettest_last():
         return None
     keys = ("rtt_avg", "rtt_p95", "jitter_ms", "loss_pct", "longest_lost", "usable", "of")
     return {"id": r.get("id"), "started": r.get("started"), "place": r.get("place"), "partial": bool(r.get("partial")),
+            "site": (r.get("site") or {}).get("name"),
             "duration_s": r.get("duration_s"), "sent": r.get("sent"), "verdict": o.get("verdict"), "rank": o.get("rank"),
             "mos": o.get("mos"), "summary": o.get("summary"), "numbers": {k: o.get(k) for k in keys},
             "udp": any(t.get("udp") for t in r.get("targets", [])), "notes": list(r.get("notes", []))[:3]}
@@ -3109,6 +3110,18 @@ form button{padding:12px 14px}
 .bar i{display:block;height:100%;width:0;background:var(--acc);transition:width .6s linear}
 #rep{width:100%;height:calc(100vh - 140px);min-height:460px;border:1px solid var(--line);border-radius:12px;background:transparent}
 .bb-ticks b{position:absolute;top:12px;transform:translateX(-50%);font-size:11px;font-weight:500;opacity:.75}
+#site-map{height:46vh;min-height:300px;border:1px solid var(--line);border-radius:12px;margin:0 0 10px;background:#222}
+.sp{width:26px;height:26px;border-radius:50%;border:2px solid #fff;background:#2a5bd7;color:#fff;font:700 13px/22px system-ui,sans-serif;text-align:center;box-shadow:0 1px 4px #0009}
+.sp.car{background:#d67a00}.sp.mac{background:#555}.sp.site{background:#1a9c55}.sp.drop{background:#9b30d0}
+.sp.sel{outline:3px solid #fff;outline-offset:0;transform:scale(1.3)}
+.sptip{font:600 12px system-ui,sans-serif;padding:1px 6px;border-radius:6px}
+.prow{padding:10px 12px;margin-bottom:6px;border:1px solid var(--line);border-radius:10px;background:var(--card);cursor:pointer;font-size:15px}
+.prow.sel{border-color:var(--acc);box-shadow:inset 0 0 0 1px var(--acc)}
+.prow small{display:block;opacity:.7;font-size:13px}
+.runrow{display:flex;gap:10px;align-items:flex-start;padding:8px 0;font-size:14px;border-top:1px solid var(--line)}
+.runrow input{flex:none;width:20px;height:20px;margin-top:2px}
+.runrow small{display:block;opacity:.7}
+#site-name{width:100%;flex:none;margin:6px 0 10px}
 </style></head><body>
 <h1 id="title">RV TV</h1>
 <div id="st">Checking TV...</div>
@@ -3235,8 +3248,28 @@ form button{padding:12px 14px}
  <button data-act="display" onclick="ntShow('compare')">Compare places</button>
 </div>
 <div class="grid">
+ <button class="wide" data-act="display" onclick="siteOpen()">Set location</button>
+</div>
+<div class="note" id="nt-site"></div>
+<div class="grid">
  <button data-act="display" onclick="view('tools')">Back</button>
  <button data-act="display" onclick="home()">Home</button>
+</div>
+</div>
+<div id="v-site" hidden>
+<div class="res"><div id="site-sum">Looking...</div><div class="sub" id="site-sub"></div></div>
+<div id="site-map"></div>
+<div class="note">Tap a pin or a row to choose where the dish is. Tap empty map to drop your own pin. Pinch or use + and - to zoom.</div>
+<div id="site-pins"></div>
+<label class="note" for="site-name">Name for this campground</label>
+<input id="site-name" type="text" maxlength="60" autocomplete="off" placeholder="Campground name">
+<div class="res" id="site-runs-box">
+ <div id="site-runs-h"><b>Tests it will tag</b></div>
+ <div id="site-runs"></div>
+</div>
+<div class="grid">
+ <button id="site-save" class="on" data-act="display" onclick="siteSave()" disabled>Save location</button>
+ <button data-act="display" onclick="view('nettest')">Cancel</button>
 </div>
 </div>
 <div id="v-report" hidden>
@@ -3298,18 +3331,18 @@ async function batboard(){
 }
 var CUR='main', ntTimer=null;
 function view(v){
-  var titles={main:'RV TV',cam:'BatCam',canny:'Canny',tools:'Tools',nettest:'Network test',report:'Report'};
+  var titles={main:'RV TV',cam:'BatCam',canny:'Canny',tools:'Tools',nettest:'Network test',site:'Set location',report:'Report'};
   Object.keys(titles).forEach(function(n){document.getElementById('v-'+n).hidden=(n!==v)});
   document.getElementById('title').textContent=titles[v];
   document.title=titles[v];
   CUR=v;
-  document.getElementById('tvctl').hidden=(v==='report');   // the report gets the whole screen
+  document.getElementById('tvctl').hidden=(v==='report'||v==='site');   // the report and the map get the whole screen
   if(ntTimer){clearInterval(ntTimer);ntTimer=null}
   if(v==='cam')show('BatCam: press Login if the cameras say 401, then Load.');
   else if(v==='canny'){show('Canny: pick a camera.');loadCams()}
   else if(v==='tools'){show('Tools');toolsInfo()}
   else if(v==='nettest'){ntRefresh();ntTimer=setInterval(ntRefresh,3000)}
-  else if(v==='report'){}
+  else if(v==='report'||v==='site'){}
   else refresh();
 }
 function ago(t,now){
@@ -3397,7 +3430,7 @@ function ntRender(j){
     ntSet('nt-sum',L.summary||'');
     var d=L.started?new Date(L.started*1000).toLocaleString([],{weekday:'short',hour:'numeric',minute:'2-digit'}):'';
     var len=L.sent>=60?Math.round(L.sent/60*10)/10+' min':(L.sent||0)+' s';
-    ntSet('nt-when',[L.place||'place unknown',d,len+(L.partial?' (stopped early)':'')+(L.udp?'':', ping only')].join(' · '));
+    ntSet('nt-when',[L.site||L.place||'place unknown',d,len+(L.partial?' (stopped early)':'')+(L.udp?'':', ping only')].join(' · '));
     var n=L.numbers||{};
     ntSet('nt-score',ntNum(L.mos,' / 5',1));ntSet('nt-rtt',ntNum(n.rtt_avg,' ms'));ntSet('nt-p95',ntNum(n.rtt_p95,' ms'));
     ntSet('nt-jit',ntNum(n.jitter_ms,' ms',1));ntSet('nt-loss',ntNum(n.loss_pct,' %',1));ntSet('nt-drop',ntNum(n.longest_lost,' s'));
@@ -3430,6 +3463,159 @@ async function ntStop(){
   show('Stopping...');
   try{await api('POST','/tools/nettest/stop')}catch(e){show('Cannot reach the TV box.');return}
   setTimeout(ntRefresh,1500);
+}
+var SITE={map:null,layer:null,pins:[],sel:-1,cand:null,nameTouched:false,runsFor:'',seq:0};
+async function apiJson(method,path,body){
+  var r=await fetch(path,{method:method,headers:{Authorization:'Bearer '+T,'Content-Type':'application/json'},body:JSON.stringify(body)});
+  var j={};try{j=await r.json()}catch(e){}
+  return {ok:r.ok,status:r.status,j:j};
+}
+function siteLeaflet(){
+  return new Promise(function(ok,bad){
+    if(window.L){ok();return}
+    var c=document.createElement('link');c.rel='stylesheet';c.href='/display/static/vendor/leaflet.css';document.head.appendChild(c);
+    var s=document.createElement('script');s.src='/display/static/vendor/leaflet.js';s.onload=ok;s.onerror=bad;document.head.appendChild(s);
+  });
+}
+function siteMapInit(){
+  if(SITE.map){SITE.map.invalidateSize();return}
+  var m=L.map('site-map',{zoomControl:true,attributionControl:true,tap:true});
+  m.attributionControl.setPrefix(false);
+  L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',{maxZoom:19,maxNativeZoom:18,attribution:'Esri'}).addTo(m);
+  L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}',{maxZoom:19,maxNativeZoom:18}).addTo(m);
+  SITE.layer=L.layerGroup().addTo(m);
+  m.setView([44.5,-123],6);
+  m.on('click',function(e){siteDrop(e.latlng.lat,e.latlng.lng)});
+  SITE.map=m;
+}
+function siteWhen(t){return new Date(t*1000).toLocaleString([],{weekday:'short',hour:'numeric',minute:'2-digit'})}
+function siteDist(m){return m<1000?Math.round(m)+' m':(m/1000).toFixed(1)+' km'}
+function siteBuildPins(c){
+  var pins=[],n=0;
+  (c.sites||[]).forEach(function(x){pins.push({kind:'site',id:x.id,lat:x.lat,lon:x.lon,tag:x.name,title:x.name,sub:'Saved site, '+siteDist(x.dist_m)+' from the Mac',name:x.name})});
+  (c.parks||[]).forEach(function(x){n++;pins.push({kind:'car',lat:x.lat,lon:x.lon,tag:n+' · '+siteWhen(x.at),title:'Car stop '+n,sub:'Parked '+siteWhen(x.at)+', '+siteDist(x.dist_m)+' from the Mac',mark:String(n)})});
+  if(c.mac)pins.push({kind:'mac',lat:c.mac.lat,lon:c.mac.lon,tag:'Mac',dir:'bottom',title:'Where the Mac is',sub:(c.mac.place||'')+(c.mac.accuracy_m!=null?' (±'+c.mac.accuracy_m+' m)':'')+(c.mac.age_s>1800?', position is '+Math.round(c.mac.age_s/3600)+' h old':''),mark:'M'});
+  return pins;
+}
+function siteDraw(){
+  SITE.layer.clearLayers();
+  SITE.pins.forEach(function(p,i){
+    var cls='sp '+p.kind+(i===SITE.sel?' sel':'');
+    var ic=L.divIcon({className:'',html:'<div class="'+cls+'"></div>',iconSize:[26,26],iconAnchor:[13,13]});
+    var mk=L.marker([p.lat,p.lon],{icon:ic,zIndexOffset:i===SITE.sel?1000:0}).addTo(SITE.layer);
+    var el=mk.getElement();
+    if(el&&el.firstChild)el.firstChild.textContent=p.mark||(p.kind==='site'?'S':'+');
+    var tip=document.createElement('span');tip.textContent=p.tag;
+    var dn=p.dir==='bottom';mk.bindTooltip(tip,{permanent:true,direction:dn?'bottom':'top',offset:[0,dn?16:-16],className:'sptip'});
+    mk.on('click',function(ev){L.DomEvent.stopPropagation(ev);siteSelect(i)});
+  });
+}
+function siteFit(){
+  var sel=SITE.pins[SITE.sel];if(!sel)return;
+  var b=SITE.pins.filter(function(p){return SITE.map.distance([p.lat,p.lon],[sel.lat,sel.lon])<=600}).map(function(p){return [p.lat,p.lon]});
+  if(b.length<2)SITE.map.setView([sel.lat,sel.lon],17);
+  else SITE.map.fitBounds(b,{padding:[60,60],maxZoom:18});
+}
+function siteRows(){
+  var box=document.getElementById('site-pins');box.textContent='';
+  SITE.pins.forEach(function(p,i){
+    var d=document.createElement('div');d.className='prow'+(i===SITE.sel?' sel':'');d.setAttribute('role','button');d.tabIndex=0;
+    d.appendChild(document.createTextNode(p.title));
+    var sm=document.createElement('small');sm.textContent=p.sub||'';d.appendChild(sm);
+    d.onclick=function(){siteSelect(i)};
+    box.appendChild(d);
+  });
+}
+function siteDrop(lat,lon){
+  SITE.pins=SITE.pins.filter(function(p){return p.kind!=='drop'});
+  SITE.pins.push({kind:'drop',lat:lat,lon:lon,tag:'Dropped pin',title:'Dropped pin',sub:lat.toFixed(5)+', '+lon.toFixed(5),mark:'*'});
+  siteSelect(SITE.pins.length-1);
+}
+function siteSelect(i){
+  SITE.sel=i;
+  var p=SITE.pins[i];
+  var nm=document.getElementById('site-name');
+  if(p.kind==='site'){nm.value=p.name;nm.disabled=true;SITE.nameTouched=false}
+  else{
+    nm.disabled=false;
+    if(!SITE.nameTouched){
+      var sh=SITE.cand&&SITE.cand.sheet;
+      nm.value=(sh&&sh.camp)||(SITE.cand&&SITE.cand.mac&&SITE.cand.mac.place)||'';
+    }
+  }
+  siteDraw();siteRows();siteRuns();
+  document.getElementById('site-save').disabled=false;
+}
+async function siteRuns(){
+  var p=SITE.pins[SITE.sel];if(!p)return;
+  var key=p.lat+','+p.lon,my=++SITE.seq;
+  var box=document.getElementById('site-runs');box.textContent='Checking earlier tests...';
+  var r;
+  try{r=await api('GET','/tools/site/preview?lat='+encodeURIComponent(p.lat)+'&lon='+encodeURIComponent(p.lon))}
+  catch(e){box.textContent='Could not list earlier tests.';return}
+  if(my!==SITE.seq)return;
+  box.textContent='';
+  if(!r.ok){box.textContent='Could not list earlier tests ('+(r.j.detail||r.status)+').';return}
+  var runs=(r.j.runs||[]).slice().sort(function(a,b){return b.started-a.started});
+  if(!runs.length){box.textContent='No earlier tests since your last Set location. Tests from now on tag themselves here.';return}
+  runs.forEach(function(x){
+    var row=document.createElement('label');row.className='runrow';
+    var cb=document.createElement('input');cb.type='checkbox';cb.checked=!!x.suggest;cb.dataset.id=x.id;row.appendChild(cb);
+    var tx=document.createElement('div');
+    tx.appendChild(document.createTextNode(siteWhen(x.started)+' · '+(x.place||'place unknown')+(x.short?' (short)':'')));
+    var sm=document.createElement('small');sm.textContent=x.reason||'';tx.appendChild(sm);
+    row.appendChild(tx);box.appendChild(row);
+  });
+}
+async function siteOpen(){
+  view('site');show('Looking up where the Mac and the car are...');
+  document.getElementById('site-save').disabled=true;
+  document.getElementById('site-runs').textContent='';
+  document.getElementById('site-pins').textContent='';
+  SITE.pins=[];SITE.sel=-1;SITE.nameTouched=false;
+  try{await siteLeaflet()}catch(e){show('The map did not load. Is the Mac online?');return}
+  siteMapInit();
+  var nm=document.getElementById('site-name');
+  nm.oninput=function(){SITE.nameTouched=true};
+  var r;
+  try{r=await api('GET','/tools/site/candidates')}
+  catch(e){show('Cannot reach the TV box. Are you on the RV Wi-Fi?');return}
+  if(r.status==401){show('This link is not valid any more. Ask Devon for a new one.');return}
+  if(r.status==403){show('Not allowed for your link.');return}
+  if(!r.ok){show('Could not look up positions ('+(r.j.detail||r.status)+')');return}
+  var c=r.j;SITE.cand=c;
+  document.getElementById('site-sum').textContent=c.current?('Tests here are tagged '+c.current.name+'.'):'No saved site here yet.';
+  var sub=[];
+  if(c.mac&&c.mac.age_s>1800)sub.push('The position from the Mac is '+Math.round(c.mac.age_s/3600)+' h old, so check the pin.');
+  if(c.sheet&&(c.sheet.camp||c.sheet.city))sub.push('Sheet for today: '+[c.sheet.camp,c.sheet.city].filter(Boolean).join(', ')+'.');
+  document.getElementById('site-sub').textContent=sub.join(' ');
+  SITE.pins=siteBuildPins(c);
+  if(!SITE.pins.length){
+    SITE.map.setView([44.5,-123],6);SITE.map.invalidateSize();siteRows();
+    show('No position from the Mac or the car yet. Zoom the map and tap where the dish is.');return;
+  }
+  var pick=SITE.pins.findIndex(function(p){return c.current&&p.kind==='site'&&p.id===c.current.id});
+  if(pick<0)pick=SITE.pins.findIndex(function(p){return p.kind==='car'});
+  if(pick<0)pick=SITE.pins.findIndex(function(p){return p.kind==='mac'});
+  SITE.map.invalidateSize();
+  siteSelect(pick);siteFit();
+  show('Choose where the dish is, check the name, and save.');
+}
+async function siteSave(){
+  var p=SITE.pins[SITE.sel];if(!p)return;
+  var name=document.getElementById('site-name').value.trim();
+  if(!name){show('Type a name for this campground first.');return}
+  var ids=[];document.querySelectorAll('#site-runs input[type=checkbox]').forEach(function(c){if(c.checked)ids.push(c.dataset.id)});
+  var b=document.getElementById('site-save');b.disabled=true;show('Saving...');
+  var r;
+  try{r=await apiJson('POST','/tools/site/set',{name:name,lat:p.lat,lon:p.lon,ids:ids,source:p.kind})}
+  catch(e){b.disabled=false;show('Cannot reach the TV box. Are you on the RV Wi-Fi?');return}
+  if(!r.ok){b.disabled=false;show('Could not save: '+(r.j.detail||r.status));return}
+  var n=r.j.retagged;
+  view('nettest');
+  var msg='Saved '+r.j.site.name+'. '+n+' earlier test'+(n===1?'':'s')+' tagged. Tests from now on here tag themselves.';
+  document.getElementById('nt-site').textContent=msg;
+  show(msg);
 }
 async function ntShow(kind){
   view('report');show('Loading...');

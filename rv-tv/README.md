@@ -187,6 +187,9 @@ report, `latest` prints the newest folder, `--duration 60` shortens the test, Ct
   phone as `GET /tools/site/candidates` (the Mac's fix, the car's park spots within `TV_SITE_PARK_RANGE_M` of it, saved sites,
   today's sheet campground), `GET /tools/site/preview?lat=&lon=` and `POST /tools/site/set` (all `display`). Every
   "car parked" is now kept in `stops.json` (`parks`, last 300) even when it is at the RV and ignored as a stop.
+  On the phone: Tools > Network test > **Set location** opens a satellite map with the car's park spots near the Mac
+  (numbered, with times), the Mac's own pin and saved sites; tap a pin or row (or tap empty map to drop your own pin),
+  check the name (today's sheet campground is offered), untick any test that should not be tagged, Save.
   Checks: `python3 tests/test_sites.py`.
 - Checks: `python3 tests/test_stops_batch.py` and `python3 tests/test_prepmove.py` (no network; stand-in osascript,
   launchctl and apps). They are not part of `smoke.sh`.

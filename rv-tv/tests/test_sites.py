@@ -166,5 +166,18 @@ try:
 except ImportError:
     print("skip  endpoint checks (fastapi testclient not installed)")
 
+# ---- the phone page: the Set location view exists and its script is valid JavaScript ----------------------------------------
+import re, shutil, subprocess
+page = tv.GUEST_PAGE
+check("the network test view has a Set location button and a map view",
+      "siteOpen()" in page and 'id="v-site"' in page and 'id="site-map"' in page)
+scripts = re.findall(r"<script>(.*?)</script>", page, re.S)
+if shutil.which("node") and scripts:
+    (TMP / "page.js").write_text(scripts[-1])
+    chk = subprocess.run(["node", "--check", str(TMP / "page.js")], capture_output=True, text=True)
+    check("the page script parses", chk.returncode == 0, chk.stderr[:300])
+else:
+    print("skip  page script syntax check (node not installed)")
+
 print("\nALL OK" if not fails else "\nFAILED: %s" % ", ".join(fails))
 sys.exit(1 if fails else 0)
