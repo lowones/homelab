@@ -179,6 +179,15 @@ report, `latest` prints the newest folder, `--duration 60` shortens the test, Ct
   agents again (for when you prepped and then did not cut the power; it needs ssh, since the phone page is gone). A real
   run is only started from the phone, because it would quit the terminal you type in. Report: `.run/prepmove-report.json`,
   log: `.run/prepmove.log`.
+- **Set location (sites).** `nettest.py site set "Name"` saves the Mac's position (or `--lat/--lon`) as a named site and tags
+  the runs since the previous Set location: those whose own position is within `TV_SITE_MATCH_M` (500 m) of it, and those
+  whose position was a stale fix (over 30 min old). Runs somewhere else, with no position, or already on another site are
+  left alone and listed (`--run ID` tags exactly the runs you name; `--backfill` offers every saved run, for old history). Each saved site is remembered: a later run on a fresh fix within 500 m of one is tagged by itself
+  (`.run/sites.json`, `site` in `history.jsonl` and each `result.json`; Compare shows the name). The server offers it to the
+  phone as `GET /tools/site/candidates` (the Mac's fix, the car's park spots within `TV_SITE_PARK_RANGE_M` of it, saved sites,
+  today's sheet campground), `GET /tools/site/preview?lat=&lon=` and `POST /tools/site/set` (all `display`). Every
+  "car parked" is now kept in `stops.json` (`parks`, last 300) even when it is at the RV and ignored as a stop.
+  Checks: `python3 tests/test_sites.py`.
 - Checks: `python3 tests/test_stops_batch.py` and `python3 tests/test_prepmove.py` (no network; stand-in osascript,
   launchctl and apps). They are not part of `smoke.sh`.
 

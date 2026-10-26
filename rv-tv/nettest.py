@@ -66,6 +66,10 @@ load_env()
 
 RUN_DIR = Path(os.environ.get("TV_NETTEST_DIR") or (BASE / ".run" / "nettest"))
 LOCATION_FILE = Path(os.environ.get("TV_LOCATION_FILE") or (BASE / ".run" / "location.raw"))
+SITES_FILE = Path(os.environ.get("TV_SITES_FILE") or (BASE / ".run" / "sites.json"))
+SITE_MATCH_M = float(os.environ.get("TV_SITE_MATCH_M", "500"))   # a run this close to a saved site is at that site
+SITE_FIX_MAX_AGE_S = 1800        # a location fix older than this does not name the site (the Mac may have moved)
+SITE_LOOKBACK_S = 14 * 86400     # Set location looks back this far for runs to tag, never past the previous Set location
 HISTORY_NAME = "history.jsonl"
 DEFAULT_SECONDS = 600
 DEFAULT_PING = "cloudflare=1.1.1.1,google=8.8.8.8"
@@ -659,6 +663,7 @@ def build_result(run_id, started, duration, elapsed, partial, plan, probes_by_ta
             "place": fix["place"] if fix else None,
             "geo": {"lat": fix["lat"], "lon": fix["lon"], "accuracy_m": fix["accuracy_m"], "fix_age_s": fix["age_s"]}
                    if fix and fix["lat"] is not None else None,
+            "site": site_tag_for_fix(fix),
             "udp_kbps": kbps, "targets": targets, "overall": overall, "notes": notes,
             "thresholds": {"good": GOOD, "marginal": MARGINAL, "outage_marginal_s": OUTAGE_MARGINAL,
                            "outage_poor_s": OUTAGE_POOR}}
@@ -717,6 +722,7 @@ def history_record(r):
     sent = r.get("sent") or r.get("duration_s") or 0
     return {"v": 1, "id": r["id"], "started": r["started"], "place": r.get("place"),
             "lat": geo.get("lat"), "lon": geo.get("lon"), "accuracy_m": geo.get("accuracy_m"),
+            "fix_age_s": geo.get("fix_age_s"), "site": r.get("site"),
             "duration_s": r.get("duration_s"), "sent": sent, "partial": bool(r.get("partial")),
             "short": (r.get("elapsed_s") or sent) < SHORT_S, "host": r.get("host"),
             "verdict": o.get("verdict"), "rank": o.get("rank"), "mos": o.get("mos"),
@@ -744,6 +750,14 @@ def read_history():
     return sorted(seen.values(), key=lambda x: x.get("started") or 0)
 
 
+def write_history(recs):
+    """Replace history.jsonl with these records, oldest first (written to a temp file, then renamed)."""
+    lines = [json.dumps(rec, separators=(",", ":")) for rec in sorted(recs, key=lambda x: x.get("started") or 0)]
+    tmp = history_path().with_name(HISTORY_NAME + ".tmp")
+    tmp.write_text("\n".join(lines) + "\n")
+    os.replace(str(tmp), str(history_path()))
+
+
 def sync_history(rebuild=False):
     """Append a line for every saved run that is not in history.jsonl yet (this also fills in runs that
     were saved before the history existed). With rebuild, every run's line is made again from its result.json
@@ -766,10 +780,7 @@ def sync_history(rebuild=False):
     if rebuild:
         for rec in new:
             existing[rec["id"]] = rec
-        lines = [json.dumps(rec, separators=(",", ":")) for rec in sorted(existing.values(), key=lambda x: x.get("started") or 0)]
-        tmp = history_path().with_name(HISTORY_NAME + ".tmp")
-        tmp.write_text("\n".join(lines) + "\n")
-        os.replace(str(tmp), str(history_path()))
+        write_history(existing.values())
     else:
         with open(str(history_path()), "a") as f:
             for rec in new:
@@ -1295,6 +1306,152 @@ def write_report(run_dir):
 
 
 # ====================================================================================================
+# sites: where the dish sat. Set location saves a point and a name; runs within SITE_MATCH_M of it share the site
+# ====================================================================================================
+def dist_m(lat1, lon1, lat2, lon2):
+    """Metres between two points (haversine)."""
+    import math
+    p = math.pi / 180.0
+    a = (math.sin((lat2 - lat1) * p / 2) ** 2
+         + math.cos(lat1 * p) * math.cos(lat2 * p) * math.sin((lon2 - lon1) * p / 2) ** 2)
+    return 2 * 6371000.0 * math.asin(min(1.0, math.sqrt(a)))
+
+
+def read_sites():
+    """{'sites': [{id, name, lat, lon, set_at, source}], 'anchors': [{at, site_id, retagged}]}"""
+    try:
+        d = json.loads(SITES_FILE.read_text())
+        return {"sites": [x for x in d.get("sites") or [] if isinstance(x, dict)],
+                "anchors": [x for x in d.get("anchors") or [] if isinstance(x, dict)]}
+    except (OSError, ValueError, AttributeError, TypeError):
+        return {"sites": [], "anchors": []}
+
+
+def write_sites(d):
+    SITES_FILE.parent.mkdir(parents=True, exist_ok=True)
+    tmp = SITES_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(d, indent=1))
+    os.replace(str(tmp), str(SITES_FILE))
+
+
+def nearest_site(lat, lon, sites=None, within=None):
+    """(site, metres) for the saved site closest to the point and within `within` metres, else (None, None)."""
+    within = SITE_MATCH_M if within is None else within
+    best, bd = None, None
+    for st in (read_sites()["sites"] if sites is None else sites):
+        try:
+            d = dist_m(lat, lon, float(st["lat"]), float(st["lon"]))
+        except (KeyError, TypeError, ValueError):
+            continue
+        if d <= within and (bd is None or d < bd):
+            best, bd = st, d
+    return best, bd
+
+
+def site_tag_for_fix(fix):
+    """{'id','name'} when a fresh Mac fix lands on a saved site, else None. A stale fix names nothing."""
+    if not fix or fix.get("lat") is None or fix.get("age_s") is None or fix["age_s"] > SITE_FIX_MAX_AGE_S:
+        return None
+    st, _d = nearest_site(fix["lat"], fix["lon"])
+    return {"id": st["id"], "name": st["name"]} if st else None
+
+
+def retag_candidates(lat, lon, now=None, backfill=False):
+    """Runs a Set location here could tag: those since the previous Set location (at most SITE_LOOKBACK_S back).
+    Each says whether to tag it by default: yes when its own fix is within SITE_MATCH_M of the point, or when
+    that fix was stale; no when it was somewhere else, has no position, or already belongs to another site."""
+    now = time.time() if now is None else now
+    anchors = read_sites()["anchors"]
+    prev = max([a.get("at") or 0 for a in anchors], default=0)
+    since = 0 if backfill else max(prev, now - SITE_LOOKBACK_S)       # backfill: all saved runs, for tagging old history
+    out = []
+    for rec in read_history():
+        t = rec.get("started") or 0
+        if t <= since or t > now:
+            continue
+        item = {"id": rec["id"], "started": t, "place": rec.get("place"), "lat": rec.get("lat"), "lon": rec.get("lon"),
+                "dist_m": None, "site": rec.get("site"), "short": bool(rec.get("short")), "suggest": False}
+        age = rec.get("fix_age_s")
+        if rec.get("lat") is None or rec.get("lon") is None:
+            item["reason"] = "no position saved"
+        else:
+            d = dist_m(rec["lat"], rec["lon"], lat, lon)
+            item["dist_m"] = int(round(d))
+            if rec.get("site") and d > SITE_MATCH_M:
+                item["reason"] = "already tagged %s" % rec["site"].get("name")
+            elif d <= SITE_MATCH_M:
+                item["suggest"], item["reason"] = True, "its position is %d m from here" % round(d)
+            elif age is not None and age > SITE_FIX_MAX_AGE_S:
+                item["suggest"], item["reason"] = True, "its position was %d h old, so it may not have been where the Mac was" % round(age / 3600)
+            else:
+                item["reason"] = "its position is %.1f km from here" % (d / 1000.0)
+        out.append(item)
+    return out
+
+
+def tag_runs(ids, site):
+    """Put `site` ({'id','name'} or None) on these runs, in history.jsonl and in each run's result.json."""
+    ids = set(ids)
+    recs = read_history()
+    n = 0
+    for rec in recs:
+        if rec["id"] not in ids:
+            continue
+        rec["site"] = site
+        n += 1
+        p = RUN_DIR / rec["id"] / "result.json"
+        try:
+            r = json.loads(p.read_text())
+            r["site"] = site
+            tmp = p.with_suffix(".tmp")
+            tmp.write_text(json.dumps(r))
+            os.replace(str(tmp), str(p))
+        except (OSError, ValueError):
+            pass
+    if n:
+        write_history(recs)
+    return n
+
+
+def clean_site_name(name):
+    name = re.sub(r"[\x00-\x1f\x7f]", " ", str(name or "")).strip()
+    return re.sub(r"\s+", " ", name)[:60]
+
+
+def set_site(name, lat, lon, ids=None, source="manual", now=None, backfill=False):
+    """Save the point as a site (or reuse the saved one within SITE_MATCH_M), make it the newest Set location, and
+    tag runs: `ids`, or by default the candidates retag_candidates() suggests. Returns what happened."""
+    now = time.time() if now is None else now
+    name = clean_site_name(name)
+    if not name:
+        raise ValueError("a site needs a name")
+    if not (-90 <= lat <= 90 and -180 <= lon <= 180):
+        raise ValueError("that is not a valid position")
+    cands = retag_candidates(lat, lon, now, backfill)
+    by_id = {c["id"]: c for c in cands}
+    if ids is None:
+        ids = [c["id"] for c in cands if c["suggest"]]
+    else:
+        bad = [i for i in ids if i not in by_id]
+        if bad:
+            raise ValueError("not runs since the last Set location: %s" % ", ".join(bad[:3]))
+    d = read_sites()
+    st, _dm = nearest_site(lat, lon, d["sites"])
+    created = st is None
+    if created:
+        n = 1 + max([int(re.sub(r"\D", "", x.get("id", "")) or 0) for x in d["sites"]], default=0)
+        st = {"id": "s%d" % n, "name": name, "lat": round(lat, 5), "lon": round(lon, 5), "set_at": now, "source": source}
+        d["sites"].append(st)
+    tag = {"id": st["id"], "name": st["name"]}
+    done = tag_runs(ids, tag)
+    d["anchors"].append({"at": now, "site_id": st["id"], "retagged": done})
+    d["anchors"] = d["anchors"][-500:]
+    write_sites(d)
+    return {"site": dict(st), "created": created, "retagged": done,
+            "left": [{"id": c["id"], "reason": c["reason"]} for c in cands if c["id"] not in set(ids)]}
+
+
+# ====================================================================================================
 # compare: every saved run on one graph, for comparing places and times
 # ====================================================================================================
 CMP_CSS = """
@@ -1508,6 +1665,8 @@ def render_compare(recs):
         verdict = (r.get("verdict") or "-").title()
         place = r.get("place")
         where = esc(place or "unknown")
+        if r.get("site"):
+            where = "<b>%s</b><small>%s</small>" % (esc(r["site"].get("name") or ""), esc(place or ""))
         if r.get("lat") is not None and r.get("lon") is not None:
             where += ('<small>%.4f, %.4f%s · <a href="https://www.openstreetmap.org/?mlat=%.5f&amp;mlon=%.5f#map=13/%.5f/%.5f" target="_blank" '
                       'rel="noopener noreferrer">map</a></small>' % (r["lat"], r["lon"], (" ±%d m" % r["accuracy_m"]) if r.get("accuracy_m") is not None else "",
@@ -1557,6 +1716,43 @@ def print_history(say=print):
     say("(* = short run, hidden in the compare page by default)")
 
 
+def site_cli(args):
+    sync_history()
+    if args.action == "list":
+        d = read_sites()
+        if not d["sites"]:
+            print("No sites saved yet. 'site set NAME' saves one.")
+            return 2
+        counts = {}
+        for rec in read_history():
+            if rec.get("site"):
+                counts[rec["site"]["id"]] = counts.get(rec["site"]["id"], 0) + 1
+        for x in d["sites"]:
+            print("%-4s %-30s %.5f, %.5f  %d run%s" % (x["id"], x["name"], x["lat"], x["lon"], counts.get(x["id"], 0),
+                                                       "" if counts.get(x["id"], 0) == 1 else "s"))
+        return 0
+    if not args.name:
+        print("site set needs a name, for example: site set \"Cloverdale KOA\"")
+        return 2
+    lat, lon = args.lat, args.lon
+    if lat is None or lon is None:
+        fix = location_fix()
+        if not fix or fix["lat"] is None or fix["age_s"] > SITE_FIX_MAX_AGE_S:
+            print("No fresh location fix from the Mac. Give --lat and --lon.")
+            return 2
+        lat, lon = fix["lat"], fix["lon"]
+    try:
+        res = set_site(args.name, lat, lon, ids=args.run, source="cli", backfill=args.backfill)
+    except ValueError as e:
+        print(str(e))
+        return 2
+    print("%s %s (%s) and tagged %d run%s." % ("Saved" if res["created"] else "Using", res["site"]["name"], res["site"]["id"],
+                                                 res["retagged"], "" if res["retagged"] == 1 else "s"))
+    for x in res["left"]:
+        print("  left alone: %s  (%s)" % (x["id"], x["reason"]))
+    return 0
+
+
 def latest_dir():
     try:
         dirs = sorted(d for d in RUN_DIR.iterdir() if d.is_dir() and (d / "result.json").exists())
@@ -1568,7 +1764,7 @@ def latest_dir():
 # ====================================================================================================
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
-    if not argv or argv[0] not in ("run", "report", "latest", "compare", "history", "rescore", "-h", "--help"):
+    if not argv or argv[0] not in ("run", "report", "latest", "compare", "history", "rescore", "site", "-h", "--help"):
         argv.insert(0, "run")
     ap = argparse.ArgumentParser(description="Network health test for video calls")
     sub = ap.add_subparsers(dest="cmd")
@@ -1588,7 +1784,16 @@ def main(argv=None):
     sub.add_parser("history", help="list the saved runs")
     rs = sub.add_parser("rescore", help="judge saved runs again under the current scoring rules")
     rs.add_argument("dir", nargs="*", help="run folders (default: all)")
+    st = sub.add_parser("site", help="saved sites: 'site list', or 'site set NAME' to tag where the dish is now")
+    st.add_argument("action", choices=["list", "set"])
+    st.add_argument("name", nargs="?", help="site name (set)")
+    st.add_argument("--lat", type=float, help="latitude (default: the Mac's fix)")
+    st.add_argument("--lon", type=float, help="longitude (default: the Mac's fix)")
+    st.add_argument("--run", action="append", help="tag exactly these run ids (default: the runs it suggests)")
+    st.add_argument("--backfill", action="store_true", help="offer every saved run, not just those since the last Set location")
     args = ap.parse_args(argv)
+    if args.cmd == "site":
+        return site_cli(args)
     if args.cmd == "report":
         d = Path(args.dir) if args.dir else latest_dir()
         if not d or not (d / "result.json").exists():

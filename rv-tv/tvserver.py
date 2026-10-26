@@ -1672,6 +1672,7 @@ STOP_MIN_MIN = float(os.environ.get("TV_STOP_MINUTES", "90"))     # parked at le
 STOP_HOME_M = float(os.environ.get("TV_STOP_HOME_M", "300"))      # parking this close to the Mac does not count
 STOP_MERGE_M = float(os.environ.get("TV_STOP_MERGE_M", "300"))    # visits this close share one pin on the map
 STOP_KEEP = 20000                                                 # visits kept on disk (about 2 MB); far past a year of driving
+PARK_LOG_KEEP = 300                                               # car park spots kept for Tools > Set location
 STOP_PINS_MAX = 2000                                              # pins sent to the map, newest first
 STOPS_FILE = RUN_DIR / "stops.json"
 LOCATION_HISTORY_FILE = Path(os.environ.get("TV_LOCATION_HISTORY") or LOCATION_FILE.with_name("location_history.log"))
@@ -1951,10 +1952,12 @@ def _stops_read():
     try:
         d = json.loads(STOPS_FILE.read_text())
         return {"pending": d.get("pending"), "stops": list(d.get("stops") or []), "seen": list(d.get("seen") or []),
+                "parks": list(d.get("parks") or []),
                 "last_at": float(d.get("last_at") or 0), "last_upload": d.get("last_upload"),
                 "last_error": d.get("last_error")}
     except (OSError, ValueError, AttributeError, TypeError):
-        return {"pending": None, "stops": [], "seen": [], "last_at": 0.0, "last_upload": None, "last_error": None}
+        return {"pending": None, "stops": [], "seen": [], "parks": [], "last_at": 0.0, "last_upload": None,
+                "last_error": None}
 
 
 def _stops_write(d):
@@ -2101,6 +2104,8 @@ def _stop_apply(d, ev):
         here = _mac_fix_at(at)
         at_home = bool(here) and _km(here, {"lat": ev["lat"], "lon": ev["lon"]}) * 1000 < STOP_HOME_M
         d["pending"] = None if at_home else {"lat": round(ev["lat"], 5), "lon": round(ev["lon"], 5), "at": at}
+        d["parks"].append({"lat": round(ev["lat"], 5), "lon": round(ev["lon"], 5), "at": at, "rv": at_home})
+        d["parks"] = d["parks"][-PARK_LOG_KEEP:]                # every park, even at the RV: Set location offers these
         return {"event": "park", "tracking": not at_home, "note": "at the RV, ignored" if at_home else None}
     if pend and at - pend["at"] > 36 * 3600:        # a park the drive never answered
         pend = d["pending"] = None
@@ -2604,6 +2609,83 @@ async def nettest_compare(who: Who = Depends(need("display"))):
         return path.read_text()
     page = await asyncio.get_running_loop().run_in_executor(None, build)
     return HTMLResponse(page, headers={"Cache-Control": "no-store"})
+
+
+# ---- Tools > Network test > Set location: name the campground the dish is at and tag the runs done there ----------
+SITE_PARK_RANGE_M = float(os.environ.get("TV_SITE_PARK_RANGE_M", "2000"))     # car spots this close to the Mac are offered
+SITE_PARKS_MAX = 5
+_site_lock = threading.Lock()
+
+
+def site_candidates():
+    """Blocking. What the Set location screen needs: the Mac's fix, the car's recent park spots near it (one per
+    place, nearest first), saved sites near it, the site the Mac is on now, and today's campground from the sheet."""
+    nt = nettest_mod()
+    fix = nt.location_fix()
+    out = {"mac": None, "parks": [], "sites": [], "current": None, "sheet": None, "now": time.time()}
+    if fix and fix["lat"] is not None:
+        out["mac"] = {"lat": fix["lat"], "lon": fix["lon"], "accuracy_m": fix["accuracy_m"], "age_s": fix["age_s"],
+                      "place": fix["place"]}
+        out["current"] = nt.site_tag_for_fix(fix)
+        kept = []
+        for p in sorted(_stops_read()["parks"], key=lambda x: -x["at"]):                     # newest first
+            if out["now"] - p["at"] > nt.SITE_LOOKBACK_S:
+                break
+            d = nt.dist_m(fix["lat"], fix["lon"], p["lat"], p["lon"])
+            if d <= SITE_PARK_RANGE_M and not any(nt.dist_m(k["lat"], k["lon"], p["lat"], p["lon"]) < 30 for k in kept):
+                kept.append({"lat": p["lat"], "lon": p["lon"], "at": p["at"], "dist_m": int(round(d)), "at_rv": bool(p.get("rv"))})
+        out["parks"] = sorted(kept, key=lambda k: (k["dist_m"], -k["at"]))[:SITE_PARKS_MAX]
+        for st in nt.read_sites()["sites"]:
+            d = nt.dist_m(fix["lat"], fix["lon"], st["lat"], st["lon"])
+            if d <= SITE_PARK_RANGE_M:
+                out["sites"].append({"id": st["id"], "name": st["name"], "lat": st["lat"], "lon": st["lon"], "dist_m": int(round(d))})
+        out["sites"].sort(key=lambda x: x["dist_m"])
+    try:
+        d0 = datetime.date.today()
+        itinerary_city(d0)                                   # makes sure the trip tabs are loaded
+        row = place_for(d0)
+        if row:
+            out["sheet"] = {"city": row["city"], "camp": row["camp"]}
+    except Exception as e:
+        log.warning("set location: today's campground unavailable: %s", e)
+    return out
+
+
+@app.get("/tools/site/candidates")
+async def site_candidates_endpoint(who: Who = Depends(need("display"))):
+    return await asyncio.get_running_loop().run_in_executor(None, site_candidates)
+
+
+@app.get("/tools/site/preview")
+async def site_preview_endpoint(lat: float = Query(..., ge=-90, le=90), lon: float = Query(..., ge=-180, le=180),
+                                who: Who = Depends(need("display"))):
+    """The runs a Set location at this point could tag, each with whether it is ticked by default and why."""
+    nt = nettest_mod()
+    return {"runs": await asyncio.get_running_loop().run_in_executor(None, nt.retag_candidates, lat, lon)}
+
+
+@app.post("/tools/site/set")
+async def site_set_endpoint(request: Request, who: Who = Depends(need("display"))):
+    """Body: {name, lat, lon, ids?: [run ids], source?}. Saves the site (or reuses the saved one within
+    TV_SITE_MATCH_M), makes it the newest Set location and tags the runs (ids, or the suggested ones)."""
+    try:
+        body = await request.json()
+        name, lat, lon = str(body["name"]), float(body["lat"]), float(body["lon"])
+        ids = body.get("ids")
+        if ids is not None and not (isinstance(ids, list) and all(isinstance(i, str) for i in ids)):
+            raise ValueError("ids must be a list of run ids")
+        source = re.sub(r"[^a-z]", "", str(body.get("source") or "manual").lower())[:12] or "manual"
+    except (ValueError, KeyError, TypeError):
+        raise HTTPException(400, "send {name, lat, lon} as JSON (ids and source are optional)")
+    nt = nettest_mod()
+
+    def run():
+        with _site_lock:
+            return nt.set_site(name, lat, lon, ids=ids, source=source)
+    try:
+        return await asyncio.get_running_loop().run_in_executor(None, run)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
 
 
 CAM_NAME_RE = "^(all|%s)$" % "|".join(c for c, _ in CAMS)
