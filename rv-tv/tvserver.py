@@ -2601,12 +2601,12 @@ async def nettest_report(run: str = Query("latest", pattern=NETTEST_RUN_RE), who
 
 
 @app.get("/tools/nettest/compare", response_class=HTMLResponse)
-async def nettest_compare(who: Who = Depends(need("display"))):
-    """compare.html made fresh from every saved run."""
+async def nettest_compare(days: int = Query(None, ge=1, le=3650), who: Who = Depends(need("display"))):
+    """compare.html made fresh from every saved run; per-site averages cover the last `days` days (default TV_SITE_WINDOW_DAYS)."""
     nt = nettest_mod()
 
     def build():
-        path, _n = nt.write_compare()
+        path, _n = nt.write_compare(None, days)
         return path.read_text()
     page = await asyncio.get_running_loop().run_in_executor(None, build)
     return HTMLResponse(page, headers={"Cache-Control": "no-store"})

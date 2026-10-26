@@ -70,6 +70,7 @@ SITES_FILE = Path(os.environ.get("TV_SITES_FILE") or (BASE / ".run" / "sites.jso
 SITE_MATCH_M = float(os.environ.get("TV_SITE_MATCH_M", "500"))   # a run this close to a saved site is at that site
 SITE_FIX_MAX_AGE_S = 1800        # a location fix older than this does not name the site (the Mac may have moved)
 SITE_LOOKBACK_S = 14 * 86400     # Set location looks back this far for runs to tag, never past the previous Set location
+SITE_WINDOW_DAYS = int(os.environ.get("TV_SITE_WINDOW_DAYS", "30"))   # Compare averages the runs of the last this-many days per site
 HISTORY_NAME = "history.jsonl"
 DEFAULT_SECONDS = 600
 DEFAULT_PING = "cloudflare=1.1.1.1,google=8.8.8.8"
@@ -1413,6 +1414,64 @@ def tag_runs(ids, site):
     return n
 
 
+SITE_STATS = (("mos", "mos"), ("loss", "loss_pct"), ("lost", "longest_lost"), ("rtt", "rtt_avg"), ("p95", "rtt_p95"), ("jit", "jitter_ms"))
+
+
+def _stat(vals):
+    vals = [v for v in vals if isinstance(v, (int, float))]
+    if not vals:
+        return None
+    m = sum(vals) / len(vals)
+    sd = math.sqrt(sum((v - m) ** 2 for v in vals) / len(vals)) if len(vals) > 1 else None
+    return {"mean": m, "min": min(vals), "max": max(vals), "sd": sd, "n": len(vals)}
+
+
+def _avg_bins(runs):
+    """Position by position mean of the runs' 10 s bins, ignoring lost bins; a position that fewer than half of the
+    runs have a value for stays empty. All the runs share the bin size."""
+    out = {}
+    for key in ("p50", "p95", "jitter", "loss"):
+        series = [(r.get("bins") or {}).get(key) or [] for r in runs]
+        n = max([len(x) for x in series], default=0)
+        arr = []
+        for i in range(n):
+            vals = [x[i] for x in series if i < len(x) and x[i] is not None]
+            arr.append(round(sum(vals) / len(vals), 1) if len(vals) * 2 >= len(runs) else None)
+        out[key] = arr
+    return out
+
+
+def site_summary(recs, now=None, days=None):
+    """One entry per saved site that has full runs (5 min or longer) inside the window: run count, dates, mean and
+    spread of the numbers that matter, the verdict counts and the runs' bins averaged. Newest site first. Also
+    returns how many full runs in the window have no site yet."""
+    now = time.time() if now is None else now
+    days = SITE_WINDOW_DAYS if days is None else days
+    cut = now - days * 86400
+    by, untagged = {}, 0
+    for r in recs:
+        if r.get("short") or (r.get("started") or 0) < cut:
+            continue
+        if not r.get("site"):
+            untagged += 1
+            continue
+        by.setdefault(r["site"]["id"], []).append(r)
+    out = []
+    for sid, runs in by.items():
+        runs.sort(key=lambda x: x["started"])
+        verdicts = {}
+        for r in runs:
+            v = (r.get("verdict") or "").title()
+            if v:
+                verdicts[v] = verdicts.get(v, 0) + 1
+        out.append({"id": sid, "name": runs[-1]["site"].get("name") or sid, "n": len(runs), "first": runs[0]["started"],
+                    "last": runs[-1]["started"], "stats": {k: _stat([r.get(f) for r in runs]) for k, f in SITE_STATS},
+                    "verdicts": verdicts, "bins": _avg_bins(runs), "udp": all(r.get("udp") for r in runs),
+                    "targets": ",".join(runs[-1].get("targets") or [])})
+    out.sort(key=lambda x: -x["last"])
+    return out, untagged
+
+
 def clean_site_name(name):
     name = re.sub(r"[\x00-\x1f\x7f]", " ", str(name or "")).strip()
     return re.sub(r"\s+", " ", name)[:60]
@@ -1488,7 +1547,7 @@ var sel=[],slot={};
 var W=900,H=360,L=48,RM=160,T=12,B=34,PW,PH,NS='http://www.w3.org/2000/svg';
 var svg=document.getElementById('cmp'),meas=document.getElementById('measure'),legend=document.getElementById('legend');
 var note=document.getElementById('cnote'),maxnote=document.getElementById('maxnote'),tb=document.getElementById('runs');
-var dtab=document.getElementById('dtab'),boxes=[].slice.call(tb.querySelectorAll('input.pick'));
+var dtab=document.getElementById('dtab'),boxes=[].slice.call(document.querySelectorAll('input.pick'));
 var M={rtt:{key:'p50',unit:'ms',floor:100,cap:1000,limit:D.limits.rtt,ll:'limit for the 95th'},
  jitter:{key:'jitter',unit:'ms',floor:40,cap:500,limit:D.limits.jitter,ll:'limit'},
  loss:{key:'loss',unit:'%',floor:5,cap:100,limit:D.limits.loss,ll:'limit'}};
@@ -1595,7 +1654,7 @@ function sync(){
     b.checked=on;b.disabled=!on&&sel.length>=MAXN;tr.classList.toggle('sel',on);
     sw.style.borderTopColor=on?stroke(id):'transparent';sw.style.borderTopStyle=on&&DASH[slot[id]]?'dashed':'solid'});
   maxnote.hidden=sel.length<MAXN}
-tb.addEventListener('change',function(ev){var b=ev.target;if(!b.classList.contains('pick'))return;
+document.addEventListener('change',function(ev){var b=ev.target;if(!b.classList||!b.classList.contains('pick'))return;
   setSel(b.dataset.id,b.checked);sync();draw()});
 meas.addEventListener('change',draw);
 document.getElementById('showshort').addEventListener('change',function(ev){document.body.classList.toggle('showshort',ev.target.checked)});
@@ -1621,7 +1680,7 @@ def length_label(sent):
     return ("%g min" % round(sent / 60.0, 1)) if sent >= 60 else ("%d s" % sent)
 
 
-def render_compare(recs):
+def render_compare(recs, days=None, now=None):
     """One self-contained page: every saved run as a line on one graph (x = time into the run), a table of the runs
     with tick boxes, and the same numbers as a table under the graph."""
     out = ['<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">',
@@ -1634,8 +1693,10 @@ def render_compare(recs):
         return "".join(out)
     full = [r for r in recs if not r.get("short")]
     shown = (full or recs)[-MAX_COMPARE:]
+    days = SITE_WINDOW_DAYS if days is None else days
+    sites, untagged = site_summary(recs, now, days)
     data = {"max": MAX_COMPARE, "limits": {"rtt": GOOD["rtt"], "jitter": GOOD["jitter"], "loss": GOOD["loss"]},
-            "init": [r["id"] for r in shown], "runs": []}
+            "init": [("site:" + x["id"]) for x in sites[:MAX_COMPARE]] or [r["id"] for r in shown], "runs": []}
     for r in recs:
         place = r.get("place") or "Unknown place"
         when = when_label(r["started"])
@@ -1646,8 +1707,14 @@ def render_compare(recs):
             "p50": bins.get("p50", []), "p95": bins.get("p95", []), "jitter": bins.get("jitter", []), "loss": bins.get("loss", []),
             "verdict": (r.get("verdict") or "").title(), "short": bool(r.get("short")),
             "tg": ",".join(r.get("targets") or []) + ("+udp" if r.get("udp") else "")})
+    for x in sites:
+        b = x["bins"]
+        data["runs"].append({"id": "site:" + x["id"], "label": "%s, average of %d run%s" % (x["name"], x["n"], "" if x["n"] == 1 else "s"),
+                             "tag": "%s avg" % x["name"], "sent": len(b["p50"]) * BIN_S, "bin": BIN_S, "p50": b["p50"], "p95": b["p95"],
+                             "jitter": b["jitter"], "loss": b["loss"], "verdict": "", "short": False,
+                             "tg": x["targets"] + ("+udp" if x["udp"] else "")})
     nfull = len(full)
-    out.append('<div class="sub">%d run%s saved%s. Each line is one run; the x axis is time since that run started.</div>'
+    out.append('<div class="sub">%d run%s saved%s. Each line is one run, or the average run of a site when you tick it; the x axis is time since that run started.</div>'
                % (len(recs), "" if len(recs) == 1 else "s", (", %d of them full length" % nfull) if nfull != len(recs) else ""))
     out.append('<div class="card" style="margin-top:14px"><div class="ctl"><label>Show <select id="measure">'
                '<option value="rtt">Round trip time</option><option value="jitter">Jitter</option><option value="loss">Packets lost</option></select></label>'
@@ -1655,6 +1722,29 @@ def render_compare(recs):
     out.append('<svg class="plot" id="cmp" viewBox="0 0 900 360" role="img" aria-label="Selected runs on one graph"></svg>'
                '<ul class="legend" id="legend"></ul><p class="cmpnote" id="cnote"></p>'
                '<details><summary>Show this graph as a table</summary><div class="scroll" id="dtab"></div></details></div>')
+    if sites:
+        out.append("<h2>Sites</h2>")
+        out.append('<div class="sub">Average of the full runs (%d min or longer) from the last %d days at each saved site. Tick a site to draw its '
+                   "average run on the graph; the small text under a number is the range, so a wide range means the site is not steady.%s</div>"
+                   % (SHORT_S // 60, days, (" %d full run%s in that time %s no site yet (Tools > Network test > Set location)."
+                                             % (untagged, "" if untagged == 1 else "s", "has" if untagged == 1 else "have")) if untagged else ""))
+        out.append('<div class="card scroll"><table><thead><tr><th></th><th>Site</th><th>Dates</th><th>Runs</th><th>Loss %</th>'
+                   "<th>Longest dropout</th><th>Round trip ms</th><th>95th ms</th><th>Jitter ms</th><th>Score</th><th>Verdicts</th></tr></thead><tbody>")
+
+        def cell(k, nd, unit=""):
+            st = x["stats"].get(k)
+            if not st:
+                return "<td>-</td>"
+            rng = "%s to %s" % (fmt(st["min"], "", nd), fmt(st["max"], "", nd))
+            return "<td>%s%s<small>%s%s</small></td>" % (fmt(st["mean"], "", nd), unit, rng, "" if st["sd"] is None else ", sd %s" % fmt(st["sd"], "", nd))
+        for x in sites:
+            d1, d2 = when_label(x["first"]).rsplit(",", 1)[0], when_label(x["last"]).rsplit(",", 1)[0]
+            out.append('<tr data-id="%s"><td><input type="checkbox" class="pick" data-id="%s" aria-label="Show this site on the graph"><span class="sw"></span></td>'
+                       "<td><b>%s</b></td><td>%s</td><td>%d</td>" % (esc("site:" + x["id"]), esc("site:" + x["id"]), esc(x["name"]),
+                                                                    esc(d1 if d1 == d2 else d1 + " to " + d2), x["n"]))
+            out.append(cell("loss", 2) + cell("lost", 0, " s") + cell("rtt", 0) + cell("p95", 0) + cell("jit", 1) + cell("mos", 2))
+            out.append("<td>%s</td></tr>" % esc(", ".join("%d %s" % (n, v) for v, n in sorted(x["verdicts"].items(), key=lambda kv: -kv[1]))))
+        out.append("</tbody></table></div>")
     out.append("<h2>Runs</h2>")
     out.append('<div class="ctl"><label><input type="checkbox" id="showshort"> Show short runs (under %d min)</label></div>' % (SHORT_S // 60))
     out.append('<div class="card scroll"><table><thead><tr><th></th><th data-k="when" tabindex="0">When</th><th data-k="where" tabindex="0">Where</th>'
@@ -1693,12 +1783,12 @@ def render_compare(recs):
     return "".join(out)
 
 
-def write_compare(out_path=None):
+def write_compare(out_path=None, days=None):
     sync_history()
     recs = read_history()
     path = Path(out_path) if out_path else RUN_DIR / "compare.html"
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(render_compare(recs))
+    path.write_text(render_compare(recs, days))
     return path, len(recs)
 
 
@@ -1781,6 +1871,7 @@ def main(argv=None):
     sub.add_parser("latest", help="print the latest run folder")
     cp = sub.add_parser("compare", help="write compare.html: every saved run on one graph")
     cp.add_argument("--out", help="where to write it (default: next to the runs)")
+    cp.add_argument("--days", type=int, help="days of runs to average per site (default %d)" % SITE_WINDOW_DAYS)
     sub.add_parser("history", help="list the saved runs")
     rs = sub.add_parser("rescore", help="judge saved runs again under the current scoring rules")
     rs.add_argument("dir", nargs="*", help="run folders (default: all)")
@@ -1802,7 +1893,7 @@ def main(argv=None):
         print(write_report(d))
         return 0
     if args.cmd == "compare":
-        path, n = write_compare(args.out)
+        path, n = write_compare(args.out, args.days)
         print("%s  (%d run%s)" % (path, n, "" if n == 1 else "s"))
         return 0 if n else 2
     if args.cmd == "rescore":

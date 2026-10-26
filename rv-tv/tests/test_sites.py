@@ -120,6 +120,38 @@ try:
 except ValueError:
     check("without backfill an old run is refused", True)
 
+# ---- per-site averages in Compare ----------------------------------------------------------------------------------------
+def full_run(rid, ago_days, site, loss, lost, rtt, mos, verdict, bins_loss, short=False):
+    return {"v": 1, "id": rid, "started": NOW - ago_days * 86400, "place": "X", "lat": 1.0, "lon": 2.0, "accuracy_m": 40, "fix_age_s": 60,
+            "site": site, "short": short, "sent": 600, "verdict": verdict, "rank": 1, "mos": mos, "rtt_avg": rtt, "rtt_p95": rtt * 2,
+            "jitter_ms": 5.0, "loss_pct": loss, "longest_lost": lost, "udp": True, "targets": ["cloudflare", "oracle"], "bin_s": 10,
+            "bins": {"p50": [30.0, 40.0], "p95": [60.0, 80.0], "jitter": [5.0, 5.0], "loss": bins_loss}}
+S1, S2 = {"id": "s1", "name": "South Beach 71"}, {"id": "s2", "name": "Cloverdale 38"}
+recs = [full_run("r1", 3, S1, 2.0, 3, 50.0, 4.2, "MARGINAL", [0.0, 10.0]),
+        full_run("r2", 2, S1, 4.0, 5, 60.0, 4.0, "POOR", [0.0, 20.0]),
+        full_run("r3", 1, S1, 6.0, 10, 70.0, 3.8, "POOR", [0.0, None]),
+        full_run("r4", 1, S1, 90.0, 99, 999.0, 1.0, "POOR", [90.0, 90.0], short=True),            # short: left out
+        full_run("r5", 40, S1, 50.0, 50, 500.0, 2.0, "POOR", [50.0, 50.0]),                        # outside the 30-day window
+        full_run("r6", 5, S2, 1.0, 2, 40.0, 4.3, "MARGINAL", [1.0, 1.0]),
+        full_run("r7", 1, None, 7.0, 7, 70.0, 3.9, "POOR", [7.0, 7.0])]                              # no site yet
+sites, untagged = nt.site_summary(recs, NOW, 30)
+check("two sites, newest first, short and old runs left out, the untagged run counted",
+      [x["id"] for x in sites] == ["s1", "s2"] and sites[0]["n"] == 3 and untagged == 1, (sites[0]["n"], untagged))
+st = sites[0]["stats"]
+check("mean and range of loss", abs(st["loss"]["mean"] - 4.0) < 1e-9 and st["loss"]["min"] == 2.0 and st["loss"]["max"] == 6.0, st["loss"])
+check("spread (standard deviation) of loss", abs(st["loss"]["sd"] - 1.633) < 0.01, st["loss"])
+check("longest dropout keeps its worst", st["lost"]["max"] == 10 and abs(st["lost"]["mean"] - 6.0) < 1e-9, st["lost"])
+check("a site with one run has no spread", sites[1]["stats"]["loss"]["sd"] is None)
+check("verdicts are counted", sites[0]["verdicts"] == {"Marginal": 1, "Poor": 2}, sites[0]["verdicts"])
+check("bins are averaged by position, ignoring lost bins", sites[0]["bins"]["loss"] == [0.0, 15.0], sites[0]["bins"]["loss"])
+check("a 7-day window drops the 40-day run only", [x["n"] for x in nt.site_summary(recs, NOW, 7)[0]] == [3, 1])
+html = nt.render_compare(recs, 30, NOW)
+check("Compare has a Sites section with both sites", "<h2>Sites</h2>" in html and "South Beach 71" in html and "Cloverdale 38" in html)
+check("the average is a line you can tick, and it is what the graph starts with",
+      'data-id="site:s1"' in html and '"init":["site:s1","site:s2"]' in html and "average of 3 runs" in html)
+check("the untagged runs are mentioned", "no site yet" in html)
+check("with no sites tagged Compare looks as before", "<h2>Sites</h2>" not in nt.render_compare([full_run("q", 1, None, 1.0, 1, 40.0, 4.0, "GOOD", [0.0, 0.0])], 30, NOW))
+
 # ---- the compare table shows the site name -----------------------------------------------------------------------------
 html = nt.render_compare(nt.read_history())
 check("compare shows the site name", "South Beach, Newport KOA" in html)

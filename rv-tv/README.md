@@ -190,6 +190,10 @@ report, `latest` prints the newest folder, `--duration 60` shortens the test, Ct
   On the phone: Tools > Network test > **Set location** opens a satellite map with the car's park spots near the Mac
   (numbered, with times), the Mac's own pin and saved sites; tap a pin or row (or tap empty map to drop your own pin),
   check the name (today's sheet campground is offered), untick any test that should not be tagged, Save.
+  **Compare** (`./tv nettest compare`, Tools > Compare places) has a **Sites** table: per saved site, the runs of the last
+  `TV_SITE_WINDOW_DAYS` (30) days that were 5 minutes or longer, with the mean and range and spread of loss, longest dropout,
+  round trip, 95th, jitter and score, the verdict counts, and a tick box that draws the site's average run (each 10 s bin
+  averaged over its runs) on the graph. `compare --days N` (or `/tools/nettest/compare?days=N`) changes the window.
   Checks: `python3 tests/test_sites.py`.
 - Checks: `python3 tests/test_stops_batch.py` and `python3 tests/test_prepmove.py` (no network; stand-in osascript,
   launchctl and apps). They are not part of `smoke.sh`.
