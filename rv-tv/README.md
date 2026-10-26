@@ -153,8 +153,12 @@ report, `latest` prints the newest folder, `--duration 60` shortens the test, Ct
   type; the old query form (`?event=park&lat=&lon=`, optional `&at=`) still works. Events are applied in time order,
   a re-sent event is acknowledged as a `duplicate`, one older than the newest applied is `skipped`, and unusable data is
   `dropped` with a reason. All three answer `"ok": true` so the phone stops resending them. A body that is not JSON or
-  lines answers 400 (no `ok`): the phone keeps the file and Tools shows the problem. The 90 min and 36 h rules, and
-  "parked within 300 m of the RV is ignored", all use event time.
+  lines answers 400 (no `ok`): the phone keeps the file and Tools shows the problem. The stay rule (`TV_STOP_MINUTES`, default 90),
+  the 36 h rule and "parked within 300 m of the RV is ignored" all use event time.
+- **Pins: every visit is kept, the map merges.** `.run/stops.json` keeps each stay (up to 20000), never overwritten. The
+  server merges visits within `TV_STOP_MERGE_M` (default 300 m) into one pin when the map asks, showing the newest visit,
+  the longest stay and a visit count, so the radius can change without losing anything. Tools > stops status shows
+  visits (`stops`) and merged pins (`pins`).
 - **Where the Mac was, not where it is.** `locationagent.sh` also appends each fix to `.run/location_history.log`
   (`epoch|lat|lon|accuracy`, about two weeks). A park is compared with the Mac's fix nearest its time (within 45 min).
   With no such fix, an event under 3 h old falls back to the current fix and an older one counts as not at the RV

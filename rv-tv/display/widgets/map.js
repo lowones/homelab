@@ -7,7 +7,7 @@
 // its pins, route and position on a dark background and says so.
 // Also drawn: interstates / motorways (thick, white) and trunk or US-numbered primary roads (thin) with
 // route labels (data.roads, OpenStreetMap); yellow tent pins at every campground and trip-stop address
-// (data.camps); white pins where the car sat parked 90 minutes or more (data.stops). Where pins overlap,
+// (data.camps); white pins where the car sat parked TV_STOP_MINUTES or more (data.stops, already merged by the server). Where pins overlap,
 // campground beats hike beats tracked stop: a hike or stop within OVERLAP_M of a higher pin is not drawn.
 const BASE = '/display/static/';
 const S = { map: null, here: null, targetMark: null, line: [], key: '', routeKey: '', miles: 35, rem: 24, fitId: 0,

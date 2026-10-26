@@ -2,6 +2,7 @@
 """Checks for the roads, tent-pin and parked-car layers. Plain python, no network:
     python3 tests/test_map_layers.py          (needs the same packages as tvserver.py; node is optional)
 The JS helpers in display/widgets/map.js are run in node when node is installed."""
+import asyncio
 import importlib.util
 import json
 import os
@@ -132,9 +133,29 @@ tv.stop_event("park", 45.9301, -123.9601)                                       
 d = tv._stops_read(); d["pending"]["at"] -= 200 * 60; tv._stops_write(d)
 tv.stop_event("drive", None, None)
 st = tv._stops_read()["stops"]
-check("the same place twice is one pin", len(st) == 1 and st[0]["n"] == 2, st)
+check("each visit is saved on its own", len(st) == 2 and st[0]["mins"] in (100, 101) and st[1]["mins"] in (200, 201), st)
+pins = asyncio.run(tv.get_stops())["items"]
+check("the same place twice is one pin with a count and the longest stay",
+      len(pins) == 1 and pins[0]["n"] == 2 and pins[0]["mins"] in (200, 201), pins)
 r = tv.stop_event("drive", None, None)
 check("a 'drive' with nothing parked is harmless", r["logged"] is False)
+
+# merge radius and keeping everything
+V = lambda lat, lon, at, mins=60, **k: dict(lat=lat, lon=lon, at=at, mins=mins, **k)
+near = tv._stop_pins([V(45.0, -123.0, 100), V(45.0 + 0.0020, -123.0, 200), V(45.0, -123.0 + 0.0020, 300)], 300)     # ~222 m, ~157 m
+check("visits 300 m apart or less share one pin, at their average",
+      len(near) == 1 and near[0]["n"] == 3 and near[0]["at"] == 300 and abs(near[0]["lat"] - 45.00067) < 1e-4, near)
+far = tv._stop_pins([V(45.0, -123.0, 100), V(45.0 + 0.0040, -123.0, 200)], 300)                                    # ~445 m
+check("visits farther apart than that stay two pins, newest first", len(far) == 2 and far[0]["at"] == 200, far)
+check("the radius is a setting", len(tv._stop_pins([V(45.0, -123.0, 100), V(45.0 + 0.0040, -123.0, 200)], 500)) == 1)
+legacy = tv._stop_pins([V(45.0, -123.0, 100, n=3), V(45.0, -123.0, 200)], 300)
+check("an old record merged on save keeps its visit count", len(legacy) == 1 and legacy[0]["n"] == 4, legacy)
+many = [V(40.0 + i * 0.01, -120.0, 1000 + i) for i in range(900)]                                                  # 900 places, ~1 km apart
+check("no 500 cap: 900 places are 900 pins", len(tv._stop_pins(many, 300)) == 900)
+d = tv._stops_read(); keep = list(d["stops"]); d["stops"] = keep + many; tv._stops_write(d)
+check("900 more visits all stay on disk", len(tv._stops_read()["stops"]) == len(keep) + 900)
+check("the map gets merged pins from the saved visits", len(asyncio.run(tv.get_stops())["items"]) == 901)
+d = tv._stops_read(); d["stops"] = keep; tv._stops_write(d)
 tv.stop_event("park", 46.2, -123.5)
 d = tv._stops_read(); d["pending"]["at"] -= 40 * 3600; tv._stops_write(d)
 r = tv.stop_event("drive", None, None)

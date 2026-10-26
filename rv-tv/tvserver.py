@@ -1662,13 +1662,17 @@ async def get_poi():
 # Tent pins: every address in column K of the trip tabs plus column C of the "campgrounds" tab,
 # geocoded in the background (one Nominatim request a second, cached on disk). TV_CAMPS=off.
 # Stops: the iPhone reports "car parked" / "driving again" (POST /display/stop) when it leaves or
-# rejoins the car's Bluetooth; a stay of TV_STOP_MINUTES or more becomes a white pin.
+# rejoins the car's Bluetooth; a stay of TV_STOP_MINUTES or more becomes a white pin
+# (every visit is kept; visits within TV_STOP_MERGE_M of each other share one pin on the map).
 ROADS_ON = os.environ.get("TV_ROADS", "on").strip().lower() not in ("off", "0", "no", "false")
 CAMPS_ON = os.environ.get("TV_CAMPS", "on").strip().lower() not in ("off", "0", "no", "false")
 CAMPS_TAB = os.environ.get("TV_CAMPS_TAB", "campgrounds").strip() or "campgrounds"
 CAMPS_URL = os.environ.get("TV_CAMPS_URL", "").strip()          # a CSV link; default: the campgrounds tab by name
 STOP_MIN_MIN = float(os.environ.get("TV_STOP_MINUTES", "90"))     # parked at least this long to count
 STOP_HOME_M = float(os.environ.get("TV_STOP_HOME_M", "300"))      # parking this close to the Mac does not count
+STOP_MERGE_M = float(os.environ.get("TV_STOP_MERGE_M", "300"))    # visits this close share one pin on the map
+STOP_KEEP = 20000                                                 # visits kept on disk (about 2 MB); far past a year of driving
+STOP_PINS_MAX = 2000                                              # pins sent to the map, newest first
 STOPS_FILE = RUN_DIR / "stops.json"
 LOCATION_HISTORY_FILE = Path(os.environ.get("TV_LOCATION_HISTORY") or LOCATION_FILE.with_name("location_history.log"))
 STOP_MAX_AGE_DAYS = 60      # an uploaded event older than this is dropped
@@ -2105,15 +2109,9 @@ def _stop_apply(d, ev):
     mins = (at - pend["at"]) / 60.0
     d["pending"] = None
     logged = mins >= STOP_MIN_MIN
-    if logged:
-        for s_ in d["stops"]:
-            if _km(s_, pend) < 0.1:                  # the same place again: one pin, newest visit
-                s_.update(at=pend["at"], mins=round(mins), n=s_.get("n", 1) + 1)
-                break
-        else:
-            d["stops"].append({"lat": pend["lat"], "lon": pend["lon"], "at": pend["at"],
-                               "mins": round(mins), "n": 1})
-        d["stops"] = d["stops"][-500:]
+    if logged:                                       # every visit is kept; the map merges nearby ones (_stop_pins)
+        d["stops"].append({"lat": pend["lat"], "lon": pend["lon"], "at": pend["at"], "mins": round(mins)})
+        d["stops"] = d["stops"][-STOP_KEEP:]
     return {"event": "drive", "logged": logged, "minutes": round(mins)}
 
 
@@ -2171,9 +2169,41 @@ def stops_note_error(msg):
         _stops_write(d)
 
 
+def _stop_pins(stops, merge_m):
+    """Saved visits -> map pins. Visits within merge_m of a pin's first visit join it: the pin sits at their
+    average, shows the newest visit time and the longest stay, and counts the visits. Old records that
+    were merged on save carry their own count in 'n'. Newest pin first."""
+    pins = []
+    for s_ in sorted(stops, key=lambda v: v["at"]):
+        n = s_.get("n", 1)
+        for p in pins:
+            if _km(p["anchor"], s_) * 1000 <= merge_m:
+                p["sum_lat"] += s_["lat"] * n
+                p["sum_lon"] += s_["lon"] * n
+                p["n"] += n
+                p["at"] = max(p["at"], s_["at"])
+                p["mins"] = max(p["mins"] or 0, s_.get("mins") or 0)
+                break
+        else:
+            pins.append({"anchor": s_, "sum_lat": s_["lat"] * n, "sum_lon": s_["lon"] * n, "n": n,
+                         "at": s_["at"], "mins": s_.get("mins") or 0})
+    pins.sort(key=lambda p: -p["at"])
+    return [{"lat": round(p["sum_lat"] / p["n"], 5), "lon": round(p["sum_lon"] / p["n"], 5),
+             "at": p["at"], "mins": p["mins"], "n": p["n"]} for p in pins[:STOP_PINS_MAX]]
+
+
+_stop_pins_cache = {"key": None, "items": []}
+
+
 async def get_stops():
-    return {"items": [{"lat": s_["lat"], "lon": s_["lon"], "at": s_["at"], "mins": s_.get("mins")}
-                      for s_ in _stops_read()["stops"][-300:]]}
+    try:
+        st = STOPS_FILE.stat()
+        key = (st.st_mtime_ns, st.st_size, STOP_MERGE_M)
+    except OSError:
+        return {"items": []}
+    if _stop_pins_cache["key"] != key:               # the file changes a few times a day; /display/data is polled
+        _stop_pins_cache.update(key=key, items=_stop_pins(_stops_read()["stops"], STOP_MERGE_M))
+    return {"items": _stop_pins_cache["items"]}
 
 
 @app.post("/display/stop")
@@ -2223,7 +2253,8 @@ async def stops_status(who: Who = Depends(need("display"))):
     d = _stops_read()
     p = d["pending"]
     return {"last_upload": d["last_upload"], "last_error": d["last_error"], "last_event_at": d["last_at"] or None,
-            "parked_since": p["at"] if p else None, "stops": len(d["stops"]), "now": time.time()}
+            "parked_since": p["at"] if p else None, "stops": len(d["stops"]),
+            "pins": len(_stop_pins(d["stops"], STOP_MERGE_M)), "now": time.time()}
 
 
 async def _soft(coro, what):
