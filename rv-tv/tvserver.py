@@ -3380,16 +3380,20 @@ async function toolsInfo(){
     }
   }catch(e){}
 }
-var PM={armed:false,timer:null};
+var PM={armed:false,timer:null,tick:null,left:0};
+var PM_WINDOW=30;
 function pmReset(){
   PM.armed=false;if(PM.timer){clearTimeout(PM.timer);PM.timer=null}
+  if(PM.tick){clearInterval(PM.tick);PM.tick=null}
   var b=document.getElementById('pm-go');b.textContent='Prep for move';b.classList.remove('on');
 }
 function pmTap(){
   if(!PM.armed){
     PM.armed=true;
-    var b=document.getElementById('pm-go');b.textContent='Tap again to confirm (10 s)';b.classList.add('on');
-    PM.timer=setTimeout(function(){pmReset();show('Prep cancelled.')},10000);
+    var b=document.getElementById('pm-go');b.classList.add('on');
+    PM.left=PM_WINDOW;b.textContent='Tap again to confirm ('+PM.left+' s)';
+    PM.tick=setInterval(function(){PM.left--;if(PM.left>0)b.textContent='Tap again to confirm ('+PM.left+' s)'},1000);
+    PM.timer=setTimeout(function(){pmReset();show('Prep cancelled.')},PM_WINDOW*1000);
     show('This turns the TV off, quits every app and stops the RV TV service on the mini.');
     return;
   }
