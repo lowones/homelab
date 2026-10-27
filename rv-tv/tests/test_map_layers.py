@@ -228,7 +228,7 @@ else:
     js = TMP / "t.mjs"
     pol = json.dumps(enc)
     js.write_text("""
-import { decodePoly, suppressNear, labelSpots, roadText, distM, pickPoi } from '%s';
+import { decodePoly, suppressNear, labelSpots, roadText, distM, pickPoi, visitedHikes, stayText } from '%s';
 const out = [];
 const ok = (n, c, x) => out.push([n, !!c, x === undefined ? '' : JSON.stringify(x)]);
 const d = decodePoly(%s);
@@ -239,6 +239,10 @@ ok('distM ~ 111 km per degree of latitude', Math.abs(distM({lat:45,lon:-123},{la
 const hikes = [{lat:45.0,lon:-123.0},{lat:45.5,lon:-123.0}];
 const camps = [{lat:45.0008,lon:-123.0}];                         // 89 m from the first hike
 ok('hike within 150 m of a campground is dropped', JSON.stringify(suppressNear(hikes, camps, 150)) === JSON.stringify([hikes[1]]));
+const vh = visitedHikes([{lat:45.0002,lon:-123.0,mins:49,n:1,at:5},{lat:45.0003,lon:-123.0,mins:20,n:2,at:9},{lat:45.3,lon:-123.0,mins:60,n:1,at:1}], hikes, [], 150);
+ok('stops on a hike ring that hike once, with the longest stay and total visits', vh.length === 1 && vh[0].lat === 45.0 && vh[0].mins === 49 && vh[0].n === 3 && vh[0].at === 9, vh);
+ok('a stop on a campground rings nothing (tent wins)', visitedHikes([{lat:45.0002,lon:-123.0,mins:49}], hikes, [{lat:45.0001,lon:-123.0}], 150).length === 0);
+ok('stay text', stayText(49) === '49 min' && stayText(65) === '1h 05m' && stayText(0) === '');
 ok('nothing is dropped without blockers', suppressNear(hikes, [], 150).length === 2);
 ok('150 m is a limit, not 15 km', suppressNear(hikes, [{lat:45.2,lon:-123}], 150).length === 2);
 const ways = [
