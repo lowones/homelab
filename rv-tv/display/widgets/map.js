@@ -8,7 +8,7 @@
 // Also drawn: interstates / motorways (thick, white) and trunk or US-numbered primary roads (thin) with
 // route labels (data.roads, OpenStreetMap); yellow tent pins at every campground and trip-stop address
 // (data.camps); white pins where the car sat parked TV_STOP_MINUTES or more (data.stops, already merged by the server). Where pins overlap,
-// campground beats hike beats tracked stop: a hike or stop within OVERLAP_M of a higher pin is not drawn, except that a stop on a hike rings that hike pin (white outline + stay).
+// campground beats hike beats tracked stop: a hike or stop within OVERLAP_M of a higher pin is not drawn, except that a stop on a hike rings that hike pin (thick white outline).
 const BASE = '/display/static/';
 const S = { map: null, here: null, targetMark: null, line: [], key: '', routeKey: '', miles: 35, rem: 24, fitId: 0,
             loads: 0, errors: 0, note: null, poiData: null, poiLayer: null, poiKey: '', hereLL: null,
@@ -75,10 +75,6 @@ export function visitedHikes(stops, hikes, camps, m) {
   });
   return [...out.values()];
 }
-export function stayText(mins) {
-  if (!mins) return '';
-  return mins >= 60 ? Math.floor(mins / 60) + 'h ' + String(Math.round(mins % 60)).padStart(2, '0') + 'm' : Math.round(mins) + ' min';
-}
 
 // Google's encoded polyline (precision 1e-5), as the server sends the roads.
 export function decodePoly(str) {
@@ -144,18 +140,13 @@ function stopIcon(rem) {
   return glyphPin('poi-pin', '#ffffff', '#1c1c1c', '<circle cx="15" cy="14.6" r="4.8" fill="#1c1c1c"/>', rem);
 }
 
-// A hike pin that has been visited again: the same red pin inside a thick white ring and glow, with the stay beside it.
-function visitedIcon(rem, mins, n) {
-  const w = Math.round(rem * 2), h = Math.round(rem * 2.8);
-  const svg = '<svg width="' + w + '" height="' + h + '" viewBox="0 0 30 42" xmlns="http://www.w3.org/2000/svg" style="filter:drop-shadow(0 0 4px #fff)">' +
-    '<path d="M15 1C7.3 1 1 7.1 1 14.7 1 25.2 15 41 15 41s14-15.8 14-26.3C29 7.1 22.7 1 15 1z" fill="#e11d2e" stroke="#fff" stroke-width="5" paint-order="stroke"/>' +
+// A hike pin that has been visited again: the same red pin inside a thick white ring and glow.
+function visitedIcon(rem) {
+  const w = Math.round(rem * 2.7), h = Math.round(rem * 3.5);     // the viewBox has 5 units of room around the pin for the ring
+  const svg = '<svg width="' + w + '" height="' + h + '" viewBox="-5 -5 40 52" xmlns="http://www.w3.org/2000/svg" style="filter:drop-shadow(0 0 4px #fff)">' +
+    '<path d="M15 1C7.3 1 1 7.1 1 14.7 1 25.2 15 41 15 41s14-15.8 14-26.3C29 7.1 22.7 1 15 1z" fill="#e11d2e" stroke="#fff" stroke-width="8" paint-order="stroke"/>' +
     '<circle cx="15" cy="14.5" r="5.2" fill="#fff"/></svg>';
-  const txt = stayText(mins) + (n > 1 ? ' x' + n : '');
-  const badge = txt ? '<span style="position:absolute;left:' + (w + 2) + 'px;top:' + Math.round(h * .12) + 'px;padding:1px ' + Math.round(rem * .3) +
-    'px;background:#fff;color:#111;border-radius:' + Math.round(rem * .3) + 'px;font:700 ' + Math.round(rem * .55) +
-    'px/1.2 system-ui,sans-serif;white-space:nowrap;box-shadow:0 1px 3px rgba(0,0,0,.6)">' + txt + '</span>' : '';
-  return L.divIcon({ className: 'hike-visited', html: '<div style="position:relative;width:' + w + 'px;height:' + h + 'px">' + svg + badge + '</div>',
-    iconSize: [w, h], iconAnchor: [w / 2, h - 1] });
+  return L.divIcon({ className: 'hike-visited', html: svg, iconSize: [w, h], iconAnchor: [w / 2, Math.round(h * 46 / 52)] });
 }
 
 // ---- post offices, libraries, Costco -----------------------------------------------------------------
@@ -258,13 +249,13 @@ function drawStops() {
   const camps = (S.campData && S.campData.items) || [];
   const shown = suppressNear(suppressNear(S.stopData.items, camps, OVERLAP_M), S.pins, OVERLAP_M);   // campground > hike > stop
   const visited = visitedHikes(S.stopData.items, S.pins, camps, OVERLAP_M);                           // a stop on a hike: ring that hike pin
-  const key = shown.map(p => p.lat + ',' + p.lon).join('|') + '#' + visited.map(v => v.lat + ',' + v.lon + ',' + v.mins + ',' + v.n).join('|') + '@' + S.rem;
+  const key = shown.map(p => p.lat + ',' + p.lon).join('|') + '#' + visited.map(v => v.lat + ',' + v.lon).join('|') + '@' + S.rem;
   if (key === S.stopKey) return;
   S.stopKey = key;
   S.stopLayer.clearLayers();
   const icon = stopIcon(S.rem);
   shown.forEach(p => L.marker([p.lat, p.lon], { icon, interactive: false, keyboard: false, pane: 'stopPane' }).addTo(S.stopLayer));
-  visited.forEach(v => L.marker([v.lat, v.lon], { icon: visitedIcon(S.rem, v.mins, v.n), interactive: false, keyboard: false, pane: 'visitPane' }).addTo(S.stopLayer));
+  visited.forEach(v => L.marker([v.lat, v.lon], { icon: visitedIcon(S.rem), interactive: false, keyboard: false, pane: 'visitPane' }).addTo(S.stopLayer));
 }
 
 // Highways: lines are rebuilt when the server's copy changes; labels when the view moves.
