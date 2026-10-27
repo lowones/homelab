@@ -60,11 +60,12 @@ export function suppressNear(items, blockers, m) {
   return items.filter(it => !blockers.some(b => Math.abs(b.lat - it.lat) <= dlat && distM(it, b) < m));
 }
 
-// Stops that landed on an existing hike pin (and not on a campground pin, which wins): one entry per hike,
+// Stops from the last 90 days that landed on an existing hike pin (and not on a campground pin, which wins): one entry per hike,
 // placed at the hike pin, carrying the longest stay, the newest visit and the visit count.
-export function visitedHikes(stops, hikes, camps, m) {
+export function visitedHikes(stops, hikes, camps, m, maxAgeDays = 90, now = Date.now() / 1000) {
   const out = new Map();
-  suppressNear(stops || [], camps || [], m).forEach(st => {
+  const fresh = (stops || []).filter(st => !maxAgeDays || !st.at || now - st.at <= maxAgeDays * 86400);   // an old visit stops ringing the pin
+  suppressNear(fresh, camps || [], m).forEach(st => {
     let best = null, bd = m;
     (hikes || []).forEach(h => { const d = distM(st, h); if (d < bd) { bd = d; best = h; } });
     if (!best) return;
