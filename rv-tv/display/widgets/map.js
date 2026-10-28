@@ -163,7 +163,7 @@ const POI = {
 };
 
 function poiIcon(kind, rem) {
-  const w = Math.round(rem * 1.6), h = Math.round(rem * 2.24), c = POI[kind];
+  const w = Math.round(rem * 1.25), h = Math.round(rem * 1.75), c = POI[kind];      // a bit smaller than the tent and stop pins
   const svg = '<svg width="' + w + '" height="' + h + '" viewBox="0 0 30 42" xmlns="http://www.w3.org/2000/svg">' +
     '<path d="M15 1C7.3 1 1 7.1 1 14.7 1 25.2 15 41 15 41s14-15.8 14-26.3C29 7.1 22.7 1 15 1z" fill="' + c.color + '" stroke="#fff" stroke-width="2"/>' +
     c.glyph + '</svg>';
@@ -173,7 +173,8 @@ function poiIcon(kind, rem) {
 // Nearest `count` of each kind among those inside the current view AND within `maxMiles` of the Mac
 // (so a wide map still only shows what is close; 0 or missing = no distance limit).
 // `byKind` ({post: 10, library: 10}) overrides maxMiles for those kinds.
-export function pickPoi(items, bounds, here, count, maxMiles, byKind) {
+// `countByKind` ({post: 2, library: 2}) overrides count for those kinds.
+export function pickPoi(items, bounds, here, count, maxMiles, byKind, countByKind) {
   const out = [];
   const origin = { lat: here[0], lon: here[1] };
   for (const kind of Object.keys(POI)) {
@@ -182,7 +183,8 @@ export function pickPoi(items, bounds, here, count, maxMiles, byKind) {
     const inView = items.filter(p => p.t === kind && bounds.contains([p.lat, p.lon]) && near(p))
       .map(p => ({ p, d: Math.hypot(p.lat - here[0], (p.lon - here[1]) * Math.cos(here[0] * Math.PI / 180)) }))
       .sort((a, b) => a.d - b.d);
-    inView.slice(0, count).forEach(x => out.push(x.p));
+    const n = countByKind && countByKind[kind] != null ? Number(countByKind[kind]) : count;
+    inView.slice(0, n).forEach(x => out.push(x.p));
   }
   return out;
 }
@@ -191,7 +193,7 @@ function drawPoi() {
   const map = S.map;
   if (!map || !S.poiLayer) return;
   const d = S.poiData, here = S.hereLL;
-  const picked = d && here && d.items ? pickPoi(d.items, map.getBounds(), here, d.count || 5, d.max_miles, d.max_miles_by_kind) : [];
+  const picked = d && here && d.items ? pickPoi(d.items, map.getBounds(), here, d.count || 5, d.max_miles, d.max_miles_by_kind, d.count_by_kind) : [];
   const key = picked.map(p => p.t + p.lat + ',' + p.lon).join('|') + '@' + S.rem;
   if (key === S.poiKey) return;                              // nothing changed: leave the markers alone
   S.poiKey = key;

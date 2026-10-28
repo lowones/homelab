@@ -15,9 +15,10 @@ function fmtDate(iso) {
   const [y, m, d] = iso.split('-').map(Number);
   return new Date(y, m - 1, d).toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' });
 }
-function fmtDur(min) {
-  const h = Math.floor(min / 60), m = Math.round(min % 60);
-  return h ? h + ' h' + (m ? ' ' + m + ' min' : '') : m + ' min';
+function fmtDur(min) {                       // HH:MM, e.g. 2:21 (0:45 under an hour)
+  let h = Math.floor(min / 60), m = Math.round(min % 60);
+  if (m === 60) { h += 1; m = 0; }
+  return h + ':' + String(m).padStart(2, '0');
 }
 
 export default {
@@ -58,8 +59,8 @@ export default {
     if (!nav.move_day && t.date) bits.push(fmtDate(t.date));
     const r = nav.route;
     if (r) {
-      bits.push(Math.round(r.miles) + ' mi' + (r.straight ? ' straight line' : ' by road'));
-      if (r.minutes) bits.push('about ' + fmtDur(r.minutes));
+      const miles = Math.round(r.miles) + (Math.round(r.miles) === 1 ? ' mile' : ' miles');
+      bits.push(miles + (r.straight ? ' (straight line)' : '') + (r.minutes ? ' - ' + fmtDur(r.minutes) : ''));
     } else if (!nav.error) {
       bits.push('finding the route…');
     }

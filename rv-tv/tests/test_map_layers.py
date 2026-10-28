@@ -270,6 +270,13 @@ const per = pickPoi(pl, view, here, 5, 15, {post: 10, library: 10});
 ok('per-kind 10-mile limit: post/library beyond ~10 mi dropped, Costco at ~14 mi kept under the 15-mile default',
    per.filter(p => p.t === 'post').length === 1 && per.filter(p => p.t === 'library').length === 1 &&
    per.filter(p => p.t === 'costco').length === 1, per);
+const many = [{t:'post',lat:45.01,lon:-123.5},{t:'post',lat:45.02,lon:-123.5},{t:'post',lat:45.03,lon:-123.5},
+              {t:'library',lat:45.01,lon:-123.5},{t:'library',lat:45.02,lon:-123.5},{t:'library',lat:45.03,lon:-123.5},
+              {t:'costco',lat:45.01,lon:-123.5},{t:'costco',lat:45.02,lon:-123.5},{t:'costco',lat:45.03,lon:-123.5}];
+const cb = pickPoi(many, view, here, 5, 15, {post: 10, library: 10}, {post: 2, library: 2});
+ok('per-kind count: only the two nearest post offices and libraries, Costco keeps the default',
+   cb.filter(p => p.t === 'post').length === 2 && cb.filter(p => p.t === 'library').length === 2 &&
+   cb.filter(p => p.t === 'costco').length === 3 && cb.filter(p => p.t === 'post').every(p => p.lat < 45.025), cb);
 console.log(JSON.stringify(out));
 """ % ((ROOT / "display" / "widgets" / "map.js").as_posix(), pol))
     # map.js is an ES module; node needs it to be treated as one

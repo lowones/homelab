@@ -1543,6 +1543,7 @@ POI_ON = os.environ.get("TV_POI", "on").strip().lower() not in ("off", "0", "no"
 POI_COUNT = max(1, min(20, int(os.environ.get("TV_POI_COUNT", "5") or 5)))     # per kind, on screen
 POI_MILES = max(0.0, float(os.environ.get("TV_POI_MILES", "15") or 15))        # farther than this from the RV: not drawn (0 = no limit)
 POI_LOCAL_MILES = max(0.0, float(os.environ.get("TV_POI_LOCAL_MILES", "10") or 10))   # post offices and libraries: tighter limit
+POI_LOCAL_COUNT = max(1, min(20, int(os.environ.get("TV_POI_LOCAL_COUNT", "2") or 2)))   # post offices and libraries: only the nearest few
 # TV_OVERPASS_URL is one URL or a comma-separated list, tried in order: the free public servers
 # go down now and then (502, or no answer), so a second one takes over. The server that answered
 # last is tried first next time, so a dead one does not cost a timeout on every refresh.
@@ -1653,7 +1654,8 @@ async def get_poi():
         return None
     # max_miles is the default limit; max_miles_by_kind overrides it per kind (0 = no limit for that kind)
     return {"items": value, "count": POI_COUNT, "max_miles": POI_MILES,
-            "max_miles_by_kind": {"post": POI_LOCAL_MILES, "library": POI_LOCAL_MILES}}
+            "max_miles_by_kind": {"post": POI_LOCAL_MILES, "library": POI_LOCAL_MILES},
+            "count_by_kind": {"post": POI_LOCAL_COUNT, "library": POI_LOCAL_COUNT}}
 
 
 # ---- map layers: highways, campground pins, parked-car stops ------------------------------
