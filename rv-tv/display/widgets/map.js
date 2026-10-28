@@ -37,8 +37,9 @@ export function zoomFor(lat, px, miles) {
   return Math.max(3, Math.min(17, z));
 }
 
+const HIKE_W = 0.88, HIKE_H = 1.23;      // rem; the revisited-hike pin uses the same pin size
 function pinIcon(rem) {
-  const w = Math.round(rem * 1.1), h = Math.round(rem * 1.54);
+  const w = Math.round(rem * HIKE_W), h = Math.round(rem * HIKE_H);
   const svg = '<svg width="' + w + '" height="' + h + '" viewBox="0 0 30 42" xmlns="http://www.w3.org/2000/svg">' +
     '<path d="M15 1C7.3 1 1 7.1 1 14.7 1 25.2 15 41 15 41s14-15.8 14-26.3C29 7.1 22.7 1 15 1z" fill="#e11d2e" stroke="#fff" stroke-width="2"/>' +
     '<circle cx="15" cy="14.5" r="5.2" fill="#fff"/></svg>';
@@ -124,8 +125,9 @@ export function labelSpots(ways, bounds, gapM, max) {
 }
 
 const PIN_PATH = '<path d="M15 1C7.3 1 1 7.1 1 14.7 1 25.2 15 41 15 41s14-15.8 14-26.3C29 7.1 22.7 1 15 1z"';
-function glyphPin(cls, fill, stroke, glyph, rem) {
-  const w = Math.round(rem * 1.15), h = Math.round(rem * 1.61);
+function glyphPin(cls, fill, stroke, glyph, rem, k) {
+  k = k || 1.15;
+  const w = Math.round(rem * k), h = Math.round(rem * k * 1.4);
   const svg = '<svg width="' + w + '" height="' + h + '" viewBox="0 0 30 42" xmlns="http://www.w3.org/2000/svg">' +
     PIN_PATH + ' fill="' + fill + '" stroke="' + stroke + '" stroke-width="2"/>' + glyph + '</svg>';
   return L.divIcon({ className: cls, html: svg, iconSize: [w, h], iconAnchor: [w / 2, h - 1] });
@@ -138,16 +140,20 @@ function tentIcon(rem) {
 }
 // white pin: somewhere the car sat parked for a while
 function stopIcon(rem) {
-  return glyphPin('poi-pin', '#ffffff', '#1c1c1c', '<circle cx="15" cy="14.6" r="4.8" fill="#1c1c1c"/>', rem);
+  return glyphPin('poi-pin', '#ffffff', '#1c1c1c', '<circle cx="15" cy="14.6" r="4.8" fill="#1c1c1c"/>', rem, 0.92);   // ~20% smaller than the tent pin
 }
 
-// A hike pin that has been visited again: the same red pin inside a thick white ring and glow.
+// A hike pin that has been visited again: the same red pin (80% of a plain hike pin so the whole thing stays near the other pins),
+// inside a thick white ring and glow. The svg is bigger than the pin only to leave room for the ring.
 function visitedIcon(rem) {
-  const w = Math.round(rem * 1.8), h = Math.round(rem * 2.35);     // the viewBox has 5 units of room around the pin for the ring
-  const svg = '<svg width="' + w + '" height="' + h + '" viewBox="-5 -5 40 52" xmlns="http://www.w3.org/2000/svg" style="filter:drop-shadow(0 0 4px #fff)">' +
-    '<path d="M15 1C7.3 1 1 7.1 1 14.7 1 25.2 15 41 15 41s14-15.8 14-26.3C29 7.1 22.7 1 15 1z" fill="#e11d2e" stroke="#fff" stroke-width="8" paint-order="stroke"/>' +
+  const PAD = 12, RING = 18, VIS_SCALE = 0.8;                                      // viewBox units around the pin; ring stroke (half shows outside the pin)
+  const pw = rem * HIKE_W * VIS_SCALE, ph = rem * HIKE_H * VIS_SCALE;  // the pin itself: 30 x 42 units, a little under a plain hike pin so the ringed pin stays close to the others
+  const w = Math.round(pw * (30 + 2 * PAD) / 30), h = Math.round(ph * (42 + 2 * PAD) / 42);
+  const svg = '<svg width="' + w + '" height="' + h + '" viewBox="' + (-PAD) + ' ' + (-PAD) + ' ' + (30 + 2 * PAD) + ' ' + (42 + 2 * PAD) +
+    '" xmlns="http://www.w3.org/2000/svg" style="filter:drop-shadow(0 0 4px #fff)">' +
+    '<path d="M15 1C7.3 1 1 7.1 1 14.7 1 25.2 15 41 15 41s14-15.8 14-26.3C29 7.1 22.7 1 15 1z" fill="#e11d2e" stroke="#fff" stroke-width="' + RING + '" stroke-linejoin="round" paint-order="stroke"/>' +
     '<circle cx="15" cy="14.5" r="5.2" fill="#fff"/></svg>';
-  return L.divIcon({ className: 'hike-visited', html: svg, iconSize: [w, h], iconAnchor: [w / 2, Math.round(h * 46 / 52)] });
+  return L.divIcon({ className: 'hike-visited', html: svg, iconSize: [w, h], iconAnchor: [w / 2, Math.round(h * (41 + PAD) / (42 + 2 * PAD))] });
 }
 
 // ---- post offices, libraries, Costco -----------------------------------------------------------------
