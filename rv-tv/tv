@@ -3,7 +3,7 @@
 # On the mini it reads tv.env next to this script. From another machine set TV_URL and TV_TOKEN:
 #   export TV_URL=http://neverland:8780 TV_TOKEN=...
 # Usage: tv on | off | status | inputs | apps | input HDMI_1 | volume 15|up|down
-#        tv mute on|off | app youtube.leanback.v4
+#        tv mute on|off|toggle | app youtube.leanback.v4
 #        tv display open|close|state | tv sheet | tv place "Moab, Utah" | tv place auto
 #        tv nettest [--duration 60]   10-minute network test for video calls (see README)
 #        tv prepmove --dry-run | --resume   what Tools > Prep for move would quit; load the stopped agents again
@@ -25,7 +25,10 @@ case "${1:-}" in
   apps)    req GET /apps ;;
   input)   req POST "/input/${2:?input id, e.g. HDMI_1}" ;;
   volume)  req POST "/volume/${2:?number 0-100, or up/down}" ;;
-  mute)    req POST "/mute/${2:?on or off}" ;;
+  mute)    if [ "${2:-}" = toggle ]; then   # flip the current state (what a mute key wants)
+             cur=$(curl -fsS --max-time 20 -H "Authorization: Bearer $TOKEN" "$URL/status" | python3 -c 'import sys,json; print("off" if json.load(sys.stdin).get("muted") else "on")')
+             req POST "/mute/$cur"
+           else req POST "/mute/${2:?on, off or toggle}"; fi ;;
   app)     req POST "/app/${2:?app id}" ;;
   sheet)   req POST "/display/open?page=sheet" ;;
   display) case "${2:-}" in open|close) req POST "/display/$2" ;; state) req GET /display/state ;; *) echo "usage: tv display open|close|state"; exit 1 ;; esac ;;
