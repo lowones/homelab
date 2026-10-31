@@ -213,9 +213,25 @@ def summary_sentence(rank):
             "Video calls will struggle: expect freezing, robotic audio or dropped calls."][rank]
 
 
+def _trusted_parts():
+    """The position tvserver believes, as ['lat', 'lon', 'accuracy_m', 'city', 'state'], or None.
+    tvserver holds back a fix far from the last good one (a wrong Wi-Fi database entry); a run must not be tagged
+    with such a fix, so this file wins over the raw one whenever it exists and is under 6 hours old."""
+    try:
+        d = json.loads(LOCATION_FILE.with_name("location_trusted.json").read_text())
+        if time.time() - float(d["at"]) > 6 * 3600:
+            return None
+        return [str(float(d["lat"])), str(float(d["lon"])), str(d.get("acc") or 0),
+                str(d.get("city") or ""), str(d.get("region") or "")]
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
 def location_fix():
     """The Mac's own location fix ('lat|lon|accuracy_m|city|state') if it is fresh (under 6 hours), else None.
-    Returns {'place', 'lat', 'lon', 'accuracy_m', 'age_s'}; each part is None when it is missing or invalid."""
+    Returns {'place', 'lat', 'lon', 'accuracy_m', 'age_s'}; each part is None when it is missing or invalid.
+    The position is the one tvserver believes; age_s is the age of the agent's latest write, so a held-back
+    fix does not make the believed position look old."""
     try:
         age = time.time() - LOCATION_FILE.stat().st_mtime
         if age > 6 * 3600:
@@ -223,6 +239,7 @@ def location_fix():
         parts = LOCATION_FILE.read_text().strip().split("|") + [""] * 5
     except OSError:
         return None
+    parts = (_trusted_parts() or parts) + [""] * 5
 
     def num(s, lo, hi):
         try:
