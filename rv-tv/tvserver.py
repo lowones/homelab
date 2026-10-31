@@ -1086,9 +1086,11 @@ def _save_trusted(t):
         log.warning("could not save the trusted location: %s", e)
 
 
-def _bootstrap_trusted():
+def _bootstrap_trusted(sheet=None):
     """No saved good fix (the first run after an upgrade): the biggest group of fixes in the last 12 history
-    entries, about two hours. A few wrong ones among them do not outvote the right place."""
+    entries, about two hours. A few wrong ones among them do not outvote the right place. When the sheet city is
+    known and any of those fixes are near it, only those are considered: a wrong place that has repeated for hours
+    must not beat the place the sheet says the RV is."""
     try:
         lines = LOCATION_HISTORY_FILE.read_text().splitlines()[-12:]
     except OSError:
@@ -1101,6 +1103,9 @@ def _bootstrap_trusted():
                         "acc": float(p[3]) if len(p) > 3 and p[3] else 0.0})
         except (ValueError, IndexError):
             continue
+    if sheet:
+        near = [q for q in pts if _km(q, sheet) <= LOC_SHEET_KM]
+        pts = near or pts
     best = None
     for p in pts:
         group = [q for q in pts if _km(p, q) <= LOC_RUN_KM]
@@ -1152,7 +1157,7 @@ def _judged_fix(itin=None):
     sheet = _sheet_now(itin)
     s = _fixstate
     if not s["loaded"]:
-        s["trusted"] = _load_trusted() or _bootstrap_trusted()
+        s["trusted"] = _load_trusted() or _bootstrap_trusted(sheet)
         s["loaded"] = True
     stamp = (st.st_mtime_ns, raw)
     if s["stamp"] != stamp:

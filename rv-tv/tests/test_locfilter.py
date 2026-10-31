@@ -208,6 +208,15 @@ d = fix(t + 12 * STEP, BEND, SHEET_SB)
 check("no saved fix: 7 South Beach vs 5 Bend history entries, Bend is held", d is not None and abs(d["lat"] - 44.55) < 0.01, d)
 check("the town name comes from the sheet when the restored fix has none", where(d) == "South Beach, OR", d)
 reset()
+hist = []
+for k in range(12):                                   # Bend has repeated for hours: 9 of the last 12
+    pos = SB if k in (0, 1, 2) else BEND
+    hist.append("%d|%.6f|%.6f|60" % (t + k * STEP, pos[0], pos[1]))
+tv.LOCATION_HISTORY_FILE.write_text("\n".join(hist) + "\n")
+d = fix(t + 12 * STEP, BEND, SHEET_SB)
+check("no saved fix, Bend outnumbers South Beach in the history, but the sheet says South Beach: Bend is held",
+      d is not None and abs(d["lat"] - 44.55) < 0.01, d)
+reset()
 tv.LOCATION_HISTORY_FILE.write_text("\n".join("%d|%.6f|%.6f|60" % (t + k * STEP, BEND[0], BEND[1]) for k in range(12)) + "\n")
 d = fix(t + 12 * STEP, BEND)
 check("really in Bend (all history says so): believed", where(d) == "Bend, OR", d)
