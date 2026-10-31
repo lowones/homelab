@@ -118,6 +118,14 @@ export default {
     }
     const list = add(el, 'ul', 'wx-days');
     const y = w.data.yesterday;                      // sent separately; days[0] is still today
+    // Wind (the day's top speed) and humidity (its mean) follow the low. An older server sends neither: no columns.
+    const extra = [y, ...w.data.days].some(d => d && (d.wind != null || d.hum != null));
+    if (extra) list.classList.add('cols');
+    const wxCols = (li, d) => {
+      if (!extra) return;
+      add(li, 'span', 'wd', d.wind != null ? '💨 ' + d.wind + ' mph' : '');
+      add(li, 'span', 'hm', d.hum != null ? '💧 ' + d.hum + '%' : '');
+    };
     if (y && y.hi != null && y.lo != null) {
       const li = add(list, 'li', 'wx-yday');
       li.style.opacity = '0.62';                     // quieter than today so Today stays the focus
@@ -125,6 +133,7 @@ export default {
       add(li, 'span', 'i', describe(y.code).icon);
       add(li, 'span', 'hi', deg(y.hi));
       add(li, 'span', 'lo', deg(y.lo));
+      wxCols(li, y);
     }
     w.data.days.forEach((d, i) => {
       const li = add(list, 'li');
@@ -132,6 +141,7 @@ export default {
       add(li, 'span', 'i', describe(d.code).icon);
       add(li, 'span', 'hi', deg(d.hi));
       add(li, 'span', 'lo', deg(d.lo));
+      wxCols(li, d);
     });
     drawExtra(el, data.weather_extra);
     drawTides(el, data.tides, new Date());

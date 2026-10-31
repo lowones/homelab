@@ -18,6 +18,7 @@ is the TV when the TV is on HDMI_1); POST /display/close removes it.
 """
 import asyncio
 import base64
+import bisect
 import csv
 import datetime
 import io
@@ -98,6 +99,16 @@ REMINDER_MAX = 300           # characters kept; the dashboard shows about three 
 LOCATION_FILE = Path(os.environ.get("TV_LOCATION_FILE") or Path(__file__).resolve().parent / ".run" / "location.raw")
 DEVICE_MAX_AGE = 30 * 60     # seconds: an older fix is ignored
 DEVICE_MAX_ACC = 5000        # meters: coarser than this is probably an IP-based guess
+# The Mac has no GPS: its fix comes from Apple's database of Wi-Fi networks, which now and then files a router under
+# a town it was once seen in (a Bend fix while parked at South Beach). A fix far from the last good one is therefore
+# held back, not shown, unless something else backs it up (see judge_fix). Held fixes are logged, not lost.
+LOC_JUMP_KM = float(os.environ.get("TV_LOC_JUMP_KM", "30"))     # farther than this from the last good fix is suspect
+LOC_SHEET_KM = 50.0          # "at today's sheet city": the same 50 km that decides MOVE DAY
+LOC_PARK_KM = 1.5            # a phone park (true GPS) this close backs a far fix up ...
+LOC_PARK_AGE = 3 * 3600      # ... when it is no older than this
+LOC_RUN_KM = 5.0             # held fixes this close to each other count as one steady run
+LOC_SUSTAIN = max(10, int(os.environ.get("TV_LOC_SUSTAIN_MIN", "120"))) * 60   # a run this long is believed
+LOC_TRUSTED_MAX_AGE = 6 * 3600   # a last good fix older than this no longer vetoes anything
 # Optional: the page the "Open sheet" button shows on the Mac's screen.
 SHEET_URL = os.environ.get("TV_SHEET_URL", "").strip()
 US_STATES = {"AL": "Alabama", "AK": "Alaska", "AZ": "Arizona", "AR": "Arkansas", "CA": "California",
@@ -1002,27 +1013,194 @@ def _km(a, b):
     return 6371 * 2 * math.asin(math.sqrt(h))
 
 
-def device_location():
-    """The Mac's own fix from LOCATION_FILE ('lat|lon|accuracy_m|city|state'), or None when the
-    file is missing, unreadable, stale (file age) or too coarse. Coordinates are rounded to
-    0.01 degree (~1 km) so Wi-Fi jitter does not bust the weather cache."""
+def judge_fix(fix, trusted, held, sheet, parks):
+    """Decide whether a new location fix is believed. Returns ('accept' | 'hold', reason).
+
+    fix and trusted are {'lat','lon','at'} (at = epoch seconds); trusted is the last fix that was believed, or None.
+    held lists the fixes already held back, oldest first, as (at, lat, lon), not including `fix`. sheet is today's
+    sheet city ({'lat','lon'}) or None. parks are the phone's parking events ({'lat','lon','at'}): true GPS.
+
+    A fix within LOC_JUMP_KM of the last good one is just the RV (or Wi-Fi jitter). A far one is believed only if
+    something else backs it up: it is at today's sheet city (a move day arrival), it matches a recent phone park, or
+    it has stayed put for LOC_SUSTAIN. The last of these does not apply while the sheet says the RV is at the last
+    good fix: a wrong Wi-Fi database entry can repeat the same wrong place for hours, so then only the age limit on
+    the last good fix (LOC_TRUSTED_MAX_AGE) lets a far fix through. A manual pin (tv place) overrides all of it."""
+    now = fix["at"]
+    if trusted is None:
+        return "accept", "first fix"
+    if now - trusted["at"] > LOC_TRUSTED_MAX_AGE:
+        return "accept", "the last good fix is more than %d h old" % (LOC_TRUSTED_MAX_AGE // 3600)
+    jump = _km(fix, trusted)
+    if jump <= LOC_JUMP_KM:
+        return "accept", "near the last good fix"
+    if sheet and _km(fix, sheet) <= LOC_SHEET_KM:
+        return "accept", "at today's sheet city"
+    for p in parks:
+        try:
+            if 0 <= now - float(p["at"]) <= LOC_PARK_AGE and _km(fix, p) <= LOC_PARK_KM:
+                return "accept", "matches a phone park"
+        except (KeyError, TypeError, ValueError):
+            continue
+    sheet_here = bool(sheet) and _km(trusted, sheet) <= LOC_SHEET_KM
+    if not sheet_here:
+        start = fix["at"]
+        for at, la, lo in reversed(held):
+            if _km(fix, {"lat": la, "lon": lo}) > LOC_RUN_KM:
+                break
+            start = at
+        if now - start >= LOC_SUSTAIN:
+            return "accept", "steady for %d min" % round((now - start) / 60)
+    return "hold", "%d km from the last good fix, %s" % (
+        round(jump), "and the sheet says the RV is there" if sheet_here else "and nothing else backs it up")
+
+
+_fixstate = {"stamp": None, "trusted": None, "held": [], "loaded": False, "outcome": None}
+_itin_seen = {"date": None, "loc": None}      # today's sheet city, remembered for callers that did not look it up
+
+
+def _trusted_file():
+    return LOCATION_FILE.with_name("location_trusted.json")
+
+
+def _rejected_file():
+    return LOCATION_FILE.with_name("location_rejected.log")
+
+
+def _load_trusted():
     try:
-        age = time.time() - LOCATION_FILE.stat().st_mtime
-        parts = LOCATION_FILE.read_text().strip().split("|") + [""] * 5
+        d = json.loads(_trusted_file().read_text())
+        return {"lat": float(d["lat"]), "lon": float(d["lon"]), "acc": float(d.get("acc") or 0),
+                "city": str(d.get("city") or ""), "region": str(d.get("region") or ""), "at": float(d["at"])}
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+def _save_trusted(t):
+    """The last believed fix survives a restart; nettest.py reads this file too."""
+    try:
+        p = _trusted_file()
+        tmp = p.with_suffix(".tmp")
+        tmp.write_text(json.dumps(t))
+        os.replace(tmp, p)
+    except OSError as e:
+        log.warning("could not save the trusted location: %s", e)
+
+
+def _bootstrap_trusted():
+    """No saved good fix (the first run after an upgrade): the biggest group of fixes in the last 12 history
+    entries, about two hours. A few wrong ones among them do not outvote the right place."""
+    try:
+        lines = LOCATION_HISTORY_FILE.read_text().splitlines()[-12:]
+    except OSError:
+        return None
+    pts = []
+    for ln in lines:
+        try:
+            p = ln.split("|")
+            pts.append({"at": float(p[0]), "lat": float(p[1]), "lon": float(p[2]),
+                        "acc": float(p[3]) if len(p) > 3 and p[3] else 0.0})
+        except (ValueError, IndexError):
+            continue
+    best = None
+    for p in pts:
+        group = [q for q in pts if _km(p, q) <= LOC_RUN_KM]
+        key = (len(group), max(q["at"] for q in group))
+        if best is None or key > best[0]:
+            best = (key, group)
+    if not best:
+        return None
+    newest = max(best[1], key=lambda q: q["at"])
+    return {"lat": newest["lat"], "lon": newest["lon"], "acc": newest["acc"], "city": "", "region": "",
+            "at": newest["at"]}
+
+
+def _note_rejected(fix, reason):
+    """One line per held-back fix: epoch|lat|lon|accuracy_m|reason. Newest last, about 500 kept."""
+    try:
+        p = _rejected_file()
+        with open(p, "a") as f:
+            f.write("%d|%.6f|%.6f|%d|%s\n" % (fix["at"], fix["lat"], fix["lon"], round(fix["acc"]), reason))
+        lines = p.read_text().splitlines()
+        if len(lines) > 600:
+            p.write_text("\n".join(lines[-500:]) + "\n")
+    except OSError:
+        pass
+
+
+def _sheet_now(itin=None):
+    today = datetime.date.today().isoformat()
+    if itin is not None:
+        _itin_seen.update(date=today, loc=itin)
+        return itin
+    return _itin_seen["loc"] if _itin_seen["date"] == today else None
+
+
+def _judged_fix(itin=None):
+    """The Mac's position after judge_fix, exact ({'lat','lon','acc','city','region','at'}), or None when the
+    file is missing, unreadable, stale (file age) or too coarse. A fix is judged once, when the agent writes it;
+    while a far fix is held back this stays the last good one."""
+    try:
+        st = LOCATION_FILE.stat()
+        raw = LOCATION_FILE.read_text().strip()
+        parts = raw.split("|") + [""] * 5
         lat, lon, acc = float(parts[0]), float(parts[1]), float(parts[2])
     except (OSError, ValueError):
         return None
-    if age > DEVICE_MAX_AGE or not (-90 <= lat <= 90 and -180 <= lon <= 180) or not (0 <= acc <= DEVICE_MAX_ACC):
+    if (time.time() - st.st_mtime > DEVICE_MAX_AGE or not (-90 <= lat <= 90 and -180 <= lon <= 180)
+            or not (0 <= acc <= DEVICE_MAX_ACC)):
+        return None
+    sheet = _sheet_now(itin)
+    s = _fixstate
+    if not s["loaded"]:
+        s["trusted"] = _load_trusted() or _bootstrap_trusted()
+        s["loaded"] = True
+    stamp = (st.st_mtime_ns, raw)
+    if s["stamp"] != stamp:
+        s["stamp"] = stamp
+        fix = {"lat": lat, "lon": lon, "acc": acc, "city": parts[3], "region": parts[4], "at": st.st_mtime}
+        parks = []
+        if s["trusted"] is not None and _km(fix, s["trusted"]) > LOC_JUMP_KM:       # only a far fix needs them
+            try:
+                parks = _stops_read()["parks"]
+            except Exception:
+                parks = []
+        verdict, why = judge_fix(fix, s["trusted"], s["held"], sheet, parks)
+        if verdict == "accept":
+            if s["held"]:
+                log.info("location: believing the new fix again (%s) after %d held back", why, len(s["held"]))
+            s.update(trusted=fix, held=[], outcome="accepted")
+            _save_trusted(fix)
+        else:
+            s["held"] = (s["held"] + [(fix["at"], lat, lon)])[-40:]
+            s["outcome"] = "held"
+            _note_rejected(fix, why)
+            log.warning("location: held back a fix at %.4f,%.4f (%s); still using %.4f,%.4f",
+                        lat, lon, why, s["trusted"]["lat"], s["trusted"]["lon"])
+    return s["trusted"]
+
+
+def device_location(itin=None):
+    """The Mac's own fix (see _judged_fix). Coordinates are rounded to 0.01 degree (~1 km) so Wi-Fi jitter
+    does not bust the weather cache. itin is today's sheet city, when the caller has it."""
+    t = _judged_fix(itin)
+    if t is None:
         return None
 
     def clean(s):
         s = s.strip()
         return "" if s.lower() in ("(null)", "null", "nil") else s
-    city, region = clean(parts[3]), clean(parts[4])
+    city, region = clean(t["city"]), clean(t["region"])
     abbr = {v.lower(): k for k, v in US_STATES.items()}.get(region.lower(), region)
-    label = ", ".join(x for x in (city, abbr) if x) or f"{lat:.2f}, {lon:.2f}"
-    return {"lat": round(lat, 2), "lon": round(lon, 2), "label": label, "source": "device",
-            "accuracy": round(acc)}
+    label = ", ".join(x for x in (city, abbr) if x)
+    sheet = _sheet_now()
+    if not label and sheet and _km(t, sheet) <= LOC_SHEET_KM:       # a fix restored from history has no town name
+        label = sheet["label"]
+    label = label or f"{t['lat']:.2f}, {t['lon']:.2f}"
+    out = {"lat": round(t["lat"], 2), "lon": round(t["lon"], 2), "label": label, "source": "device",
+           "accuracy": round(t["acc"])}
+    if _fixstate["outcome"] == "held":
+        out["held"] = len(_fixstate["held"])
+    return out
 
 
 async def current_location():
@@ -1036,7 +1214,7 @@ async def current_location():
                     None, itinerary_location, datetime.date.today())
             except Exception as e:
                 log.warning("itinerary location failed: %s", e)
-        dev = device_location()
+        dev = device_location(itin)
         if dev:
             if itin and _km(dev, itin) > 50:          # the sheet and the Mac disagree: say so
                 dev["schedule"] = itin["label"]
@@ -1051,16 +1229,25 @@ def fetch_weather(loc):
     q = urllib.parse.urlencode({
         "latitude": loc["lat"], "longitude": loc["lon"], "timezone": "auto", "forecast_days": 3, "past_days": 1,
         "current": "temperature_2m,apparent_temperature,weather_code,wind_speed_10m",
-        "daily": "temperature_2m_max,temperature_2m_min,weather_code,sunrise,sunset",
+        "daily": "temperature_2m_max,temperature_2m_min,weather_code,sunrise,sunset,"
+                 "wind_speed_10m_max,relative_humidity_2m_mean",
         "temperature_unit": "fahrenheit", "wind_speed_unit": "mph"})
     with urllib.request.urlopen(f"{WEATHER_URL}?{q}", timeout=8) as r:
         j = json.load(r)
     cur, d = j["current"], j["daily"]
+    n = len(d["time"])
+
+    def col(name):                       # an optional daily column: a rounded number, None where missing
+        vals = d.get(name) or [None] * n
+        return [None if v is None else round(v) for v in vals] + [None] * n
+
+    wind, hum = col("wind_speed_10m_max"), col("relative_humidity_2m_mean")
     rows = [{"date": d["time"][i], "hi": d["temperature_2m_max"][i],
              "lo": d["temperature_2m_min"][i], "code": d["weather_code"][i],
-             "rise": (d.get("sunrise") or [None] * len(d["time"]))[i],
-             "set": (d.get("sunset") or [None] * len(d["time"]))[i]}
-            for i in range(len(d["time"]))]
+             "rise": (d.get("sunrise") or [None] * n)[i],
+             "set": (d.get("sunset") or [None] * n)[i],
+             "wind": wind[i], "hum": hum[i]}
+            for i in range(n)]
     # past_days=1 puts yesterday first. It is sent on its own so that days[0] stays today
     # (sunrise/sunset and the widget's "Today" row depend on that).
     yesterday = None
@@ -1972,14 +2159,24 @@ def _stops_write(d):
 
 
 def _mac_fix():
-    """The Mac's exact position from the location agent, or None when it is missing or stale."""
+    """The Mac's exact position from the location agent (a fix held back as implausible does not count),
+    or None when it is missing or stale."""
+    t = _judged_fix()
+    return {"lat": t["lat"], "lon": t["lon"]} if t else None
+
+
+def _rejected_times():
+    """Epoch seconds of the fixes held back by judge_fix, sorted."""
+    out = []
     try:
-        age = time.time() - LOCATION_FILE.stat().st_mtime
-        parts = LOCATION_FILE.read_text().strip().split("|")
-        lat, lon = float(parts[0]), float(parts[1])
-    except (OSError, ValueError, IndexError):
-        return None
-    return {"lat": lat, "lon": lon} if age <= DEVICE_MAX_AGE else None
+        for ln in _rejected_file().read_text().splitlines()[-600:]:
+            try:
+                out.append(float(ln.split("|", 1)[0]))
+            except ValueError:
+                continue
+    except OSError:
+        pass
+    return sorted(out)
 
 
 def _mac_fix_at(t):
@@ -1992,12 +2189,16 @@ def _mac_fix_at(t):
         lines = LOCATION_HISTORY_FILE.read_text().splitlines()[-3000:]
     except OSError:
         lines = []
+    rejected = _rejected_times()
     for ln in lines:
         parts = ln.split("|")
         try:
             ts, la, lo = float(parts[0]), float(parts[1]), float(parts[2])
         except (ValueError, IndexError):
             continue
+        i = bisect.bisect_left(rejected, ts - 90)       # the agent logs a fix a second or two after writing it
+        if i < len(rejected) and rejected[i] <= ts + 90:
+            continue                                    # judge_fix held this one back: not where the Mac was
         gap = abs(ts - t)
         if gap <= 45 * 60 and (best is None or gap < best[0]):
             best = (gap, la, lo)
@@ -3768,6 +3969,20 @@ def token_cmd(args):
         sys.exit("usage: tvserver.py token add NAME [--no-off] [--display] [--stops] | revoke NAME | list | link NAME")
 
 
+def log_config_with_times():
+    """uvicorn's own logging setup with a time in front of every line, access lines included. Without it the log
+    could not say when the TV was switched on. The UTC offset tells apart the hour that repeats when the clocks
+    go back."""
+    import copy
+    import uvicorn.config
+    cfg = copy.deepcopy(uvicorn.config.LOGGING_CONFIG)
+    for name in ("default", "access"):
+        fmt = cfg["formatters"][name]
+        fmt["fmt"] = "%(asctime)s " + fmt["fmt"]
+        fmt["datefmt"] = "%Y-%m-%d %H:%M:%S%z"
+    return cfg
+
+
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "pair":
         asyncio.run(pair())
@@ -3777,4 +3992,4 @@ if __name__ == "__main__":
         if not TV_TOKEN:
             sys.exit("TV_TOKEN is not set (put it in tv.env). Refusing to start without auth.")
         import uvicorn
-        uvicorn.run(app, host=BIND, port=SERVER_PORT, log_level="info")
+        uvicorn.run(app, host=BIND, port=SERVER_PORT, log_level="info", log_config=log_config_with_times())
