@@ -145,7 +145,9 @@ body "close the sheet"                 '"was_open":true'        -X POST -H "$A a
 
 echo "-- weather follows the Mac's own location (device fix)"
 T3=$T/third; mkdir -p $T3; LOC=$T/loc.raw; rm -f $LOC
-TV_SERVER_PORT=8796 TV_DISPLAY_FILE=$T3/display.json TV_LOCATION_FILE=$LOC \
+# this group teleports the Mac (Moab -> Seaside in one step); the filter that holds such a jump back is
+# switched off here and tested on its own in tests/test_locfilter.py
+TV_LOC_JUMP_KM=100000 TV_SERVER_PORT=8796 TV_DISPLAY_FILE=$T3/display.json TV_LOCATION_FILE=$LOC \
   TV_ITINERARY="http://127.0.0.1:$STUB_PORT/trip.csv?gid=555" $PY "$HERE/tvserver.py" > $T/server3.log 2>&1 & P5=$!
 for i in $(seq 1 30); do curl -fs http://127.0.0.1:8796/health >/dev/null 2>&1 && break; sleep 0.3; done
 B3=http://127.0.0.1:8796
