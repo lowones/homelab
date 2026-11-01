@@ -40,6 +40,9 @@ browser window on the Mac pointed at `/display`. `POST /display/close` closes it
   (column 4; blank rows mean "still there"; ignored 14 days after the last dated row). Refetched every
   15 min (`TV_ITINERARY_REFRESH=<seconds>`, minimum 60). Setting a place by hand pins it;
   `./tv place auto` or "Follow schedule" goes back to the sheet.
+  When the Mac's own fix is more than 50 km from today's sheet city but your newest network-test **Set location**
+  (under 48 h old, `TV_SETLOC_MAX_AGE_H`) is within 50 km of it, the Set location is used as "here" (the location
+  widget says "From your Set location") and test runs are tagged with it; no MOVE DAY. Tap Set location once per stop.
 - **Reminder** (same trip tabs, nothing to configure): today's row can put a red "Reminder" card at the
   top right, cut off after three lines. Two columns fire it. **Column G (REMINDER):** shown unless the
   cell is only a date that is already past (`m/d/yyyy`, `m/d/yy` or `yyyy-mm-dd`; the year must be in

@@ -227,6 +227,19 @@ def _trusted_parts():
         return None
 
 
+def _override_parts():
+    """The Set location tvserver is using in place of the Mac's fix (see tvserver.current_location), as
+    ['lat', 'lon', 'accuracy_m', 'name', ''], or None. Only while the file is under 30 minutes old: tvserver
+    rewrites it each time it works out the position and removes it when the Mac's own fix is used."""
+    try:
+        d = json.loads(LOCATION_FILE.with_name("location_override.json").read_text())
+        if time.time() - float(d["at"]) > 1800:
+            return None
+        return [str(float(d["lat"])), str(float(d["lon"])), "50", str(d.get("name") or ""), ""]
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
 def location_fix():
     """The Mac's own location fix ('lat|lon|accuracy_m|city|state') if it is fresh (under 6 hours), else None.
     Returns {'place', 'lat', 'lon', 'accuracy_m', 'age_s'}; each part is None when it is missing or invalid.
@@ -239,7 +252,7 @@ def location_fix():
         parts = LOCATION_FILE.read_text().strip().split("|") + [""] * 5
     except OSError:
         return None
-    parts = (_trusted_parts() or parts) + [""] * 5
+    parts = (_override_parts() or _trusted_parts() or parts) + [""] * 5
 
     def num(s, lo, hi):
         try:

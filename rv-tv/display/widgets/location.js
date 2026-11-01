@@ -2,7 +2,8 @@
 // trip sheet says today's stop is somewhere else than the Mac's own location fix, the Mac's
 // location stays on top and the sheet's stop is shown as the target. A reminder from the
 // sheet, if today has one, sits in the top right corner.
-const SOURCES = { device: "From this Mac's location", itinerary: 'From the trip schedule', manual: 'Pinned by hand' };
+const SOURCES = { device: "From this Mac's location", itinerary: 'From the trip schedule', manual: 'Pinned by hand',
+  setloc: 'From your Set location' };
 
 function add(parent, tag, cls, text) {
   const n = document.createElement(tag);
