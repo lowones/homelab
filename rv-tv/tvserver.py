@@ -1055,7 +1055,7 @@ def judge_fix(fix, trusted, held, sheet, parks):
         round(jump), "and the sheet says the RV is there" if sheet_here else "and nothing else backs it up")
 
 
-_fixstate = {"stamp": None, "trusted": None, "held": [], "loaded": False, "outcome": None}
+_fixstate = {"stamp": None, "trusted": None, "held": [], "loaded": False, "outcome": None, "raw": None}
 _itin_seen = {"date": None, "loc": None}      # today's sheet city, remembered for callers that did not look it up
 
 
@@ -1164,6 +1164,7 @@ def _judged_fix(itin=None):
     if s["stamp"] != stamp:
         s["stamp"] = stamp
         fix = {"lat": lat, "lon": lon, "acc": acc, "city": parts[3], "region": parts[4], "at": st.st_mtime}
+        s["raw"] = fix                                  # what the Mac itself says now, believed or not
         parks = []
         if s["trusted"] is not None and _km(fix, s["trusted"]) > LOC_JUMP_KM:       # only a far fix needs them
             try:
@@ -1185,19 +1186,32 @@ def _judged_fix(itin=None):
     return s["trusted"]
 
 
+def _fix_label(t):
+    """'City, ST' from a fix's own town and region ('' when it has none)."""
+    def clean(s):
+        s = s.strip()
+        return "" if s.lower() in ("(null)", "null", "nil") else s
+    city, region = clean(t["city"]), clean(t["region"])
+    abbr = {v.lower(): k for k, v in US_STATES.items()}.get(region.lower(), region)
+    return ", ".join(x for x in (city, abbr) if x)
+
+
+def _with_mac_says(r):
+    """Add r['mac'] (what the Mac itself reports now, as a name or coordinates) when that is a different place
+    than the one r shows: the Mac's latest fix is being held back, or a Set location stands in for it."""
+    raw = _fixstate.get("raw")
+    if raw and _km(raw, r) > LOC_RUN_KM:
+        r["mac"] = _fix_label(raw) or f"{raw['lat']:.2f}, {raw['lon']:.2f}"
+    return r
+
+
 def device_location(itin=None):
     """The Mac's own fix (see _judged_fix). Coordinates are rounded to 0.01 degree (~1 km) so Wi-Fi jitter
     does not bust the weather cache. itin is today's sheet city, when the caller has it."""
     t = _judged_fix(itin)
     if t is None:
         return None
-
-    def clean(s):
-        s = s.strip()
-        return "" if s.lower() in ("(null)", "null", "nil") else s
-    city, region = clean(t["city"]), clean(t["region"])
-    abbr = {v.lower(): k for k, v in US_STATES.items()}.get(region.lower(), region)
-    label = ", ".join(x for x in (city, abbr) if x)
+    label = _fix_label(t)
     sheet = _sheet_now()
     if not label and sheet and _km(t, sheet) <= LOC_SHEET_KM:       # a fix restored from history has no town name
         label = sheet["label"]
@@ -1265,11 +1279,11 @@ async def current_location():
                 sl = newest_set_location()
                 if sl and _km(sl, itin) <= LOC_SHEET_KM:
                     _note_override(sl)
-                    return {"lat": round(sl["lat"], 2), "lon": round(sl["lon"], 2), "label": sl["name"],
-                            "source": "setloc"}
+                    return _with_mac_says({"lat": round(sl["lat"], 2), "lon": round(sl["lon"], 2),
+                                           "label": sl["name"], "source": "setloc"})
                 dev["schedule"] = itin["label"]
             _note_override(None)
-            return dev
+            return _with_mac_says(dev)
         _note_override(None)
         if itin:
             return itin
@@ -1329,7 +1343,7 @@ async def get_weather():
             if _weather["key"] != key:
                 _weather["data"] = None
             log.warning("weather fetch failed: %s", _weather["error"])
-    return {"location": loc["label"], "source": loc["source"], "data": _weather["data"], "error": _weather["error"],
+    return {"location": loc["label"], "source": loc["source"], "mac": loc.get("mac"), "data": _weather["data"], "error": _weather["error"],
             "updated": _weather["at"], "schedule": loc.get("schedule")}
 
 
@@ -1702,7 +1716,8 @@ async def get_nav():
     stop = None
     if ITIN_SOURCES:
         stop = await loop.run_in_executor(None, pick_target, datetime.date.today(), move_day)
-    out = {"here": {"lat": loc["lat"], "lon": loc["lon"], "label": loc["label"], "source": loc["source"]},
+    out = {"here": {"lat": loc["lat"], "lon": loc["lon"], "label": loc["label"], "source": loc["source"],
+                    "mac": loc.get("mac")},
            "move_day": move_day, "target": None, "route": None, "error": None}
     if stop:
         target = {"label": stop["city"], "address": stop["address"], "date": stop["date"].isoformat()}

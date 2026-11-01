@@ -32,7 +32,13 @@ export default {
     const main = add(head, 'div', 'loc-main');
     if (nav && nav.move_day) add(main, 'div', 'loc-badge', 'MOVE DAY');
     add(main, 'div', 'loc-label', here.label || 'Location unknown');
-    if (SOURCES[here.source]) add(main, 'div', 'loc-src', SOURCES[here.source]);
+    if (SOURCES[here.source]) {
+      let src = SOURCES[here.source];
+      // here.mac: what the Mac itself reports now, when that is a different place than the one shown
+      if (here.mac) src = here.source === 'setloc' ? src + ' (Mac says ' + here.mac + ')'
+        : here.source === 'device' ? "From this Mac's last good fix (Mac now says " + here.mac + ')' : src;
+      add(main, 'div', 'loc-src', src);
+    }
     // Column G of today's row on the trip sheet (data.reminder): top right, opposite the place.
     if (rem) {
       const card = add(head, 'div', 'loc-reminder' + (rem.lines ? ' has-places' : ''));

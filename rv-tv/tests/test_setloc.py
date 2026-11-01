@@ -174,9 +174,48 @@ tv._override_file().write_text(json.dumps(d))
 fx = nt.location_fix()
 check("nettest ignores an override file older than 30 minutes", fx and fx["place"] != "South Beach, OR", fx)
 
+# ---- "Mac says": what the Mac itself reports now, when it is not the place shown ------------------------------------------
+st = reset()
+st["city"] = city("South Beach, OR", SB)
+put(SB, "South Beach")
+r = where()
+check("Mac and shown place agree: no 'mac' part", r["source"] == "device" and "mac" not in r, r)
+time.sleep(0.01)
+put(BEND, "Bend")
+r = where()
+check("Mac now says Bend but its last good fix is shown: label South Beach, mac 'Bend, OR'",
+      r["source"] == "device" and r["label"] == "South Beach, OR" and r.get("mac") == "Bend, OR" and r.get("held"), r)
+time.sleep(0.01)
+put(BEND, "", "")
+r = where()
+check("a held fix without a town name is shown as coordinates", r.get("mac") == "44.08, -121.26", r)
+time.sleep(0.01)
+put(SB, "South Beach")
+r = where()
+check("the Mac agrees again: the note is gone", "mac" not in r, r)
+
+st = reset()
+st["city"] = city("Florence, OR", FLO)
+put(SB, "South Beach")
+where()
+time.sleep(0.01)
+put(BEND, "Bend")
+set_site("Florence, OR", FLO)
+r = where()
+check("Set location in use while the Mac says Bend: mac 'Bend, OR'",
+      r["source"] == "setloc" and r["label"] == "Florence, OR" and r.get("mac") == "Bend, OR", r)
+time.sleep(0.01)
+put(SB, "South Beach")
+r = where()
+check("... or 'South Beach, OR' when the Mac still has its old fix", r["source"] == "setloc" and r.get("mac") == "South Beach, OR", r)
+
+src = (ROOT / "tvserver.py").read_text()
+check("the dashboard data carries 'mac' (nav.here and weather)", src.count('"mac": loc.get("mac")') == 2)
+
 # ---- display ----------------------------------------------------------------------------------------------------------------
 js = (ROOT / "display" / "widgets" / "location.js").read_text()
 check("the location widget has words for the new source", "setloc: 'From your Set location'" in js)
+check("... and for the Mac's own reading in brackets", "(Mac says " in js and "Mac now says " in js)
 
 print()
 print("all passed" if not fails else "%d FAILED: %s" % (len(fails), "; ".join(fails)))
