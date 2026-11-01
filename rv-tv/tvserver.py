@@ -109,6 +109,7 @@ LOC_PARK_AGE = 3 * 3600      # ... when it is no older than this
 LOC_RUN_KM = 5.0             # held fixes this close to each other count as one steady run
 LOC_SUSTAIN = max(10, int(os.environ.get("TV_LOC_SUSTAIN_MIN", "120"))) * 60   # a run this long is believed
 LOC_TRUSTED_MAX_AGE = 6 * 3600   # a last good fix older than this no longer vetoes anything
+SETLOC_MAX_AGE = max(1.0, float(os.environ.get("TV_SETLOC_MAX_AGE_H", "48"))) * 3600   # how long a Set location stays good
 # Optional: the page the "Open sheet" button shows on the Mac's screen.
 SHEET_URL = os.environ.get("TV_SHEET_URL", "").strip()
 US_STATES = {"AL": "Alabama", "AK": "Alaska", "AZ": "Arizona", "AR": "Arkansas", "CA": "California",
@@ -1208,8 +1209,47 @@ def device_location(itin=None):
     return out
 
 
+def newest_set_location(now=None):
+    """The newest Set location from the network tool (Tools > Network test > Set location) as
+    {'lat','lon','name','at'}, or None when there is none or it is older than SETLOC_MAX_AGE."""
+    try:
+        d = nettest_mod().read_sites()
+        anchors = [a for a in d["anchors"] if isinstance(a.get("at"), (int, float))]
+        if not anchors:
+            return None
+        last = max(anchors, key=lambda a: a["at"])
+        if (time.time() if now is None else now) - last["at"] > SETLOC_MAX_AGE:
+            return None
+        site = next(x for x in d["sites"] if x.get("id") == last.get("site_id"))
+        return {"lat": float(site["lat"]), "lon": float(site["lon"]), "name": str(site.get("name") or "Set location"),
+                "at": float(last["at"])}
+    except Exception:                      # no sites file, a half-written one, a site that was removed
+        return None
+
+
+def _override_file():
+    return Path(LOCATION_FILE).with_name("location_override.json")
+
+
+def _note_override(sl):
+    """Tell nettest.py which position a test run should be tagged with while a Set location stands in for the
+    Mac's fix (sl), or that none does (None). It ignores the file when it is more than 30 minutes old."""
+    try:
+        p = _override_file()
+        if sl is None:
+            p.unlink(missing_ok=True)
+            return
+        tmp = p.with_suffix(".tmp")
+        tmp.write_text(json.dumps({"lat": sl["lat"], "lon": sl["lon"], "name": sl["name"], "at": time.time()}))
+        os.replace(str(tmp), str(p))
+    except OSError as e:
+        log.warning("could not write the Set location override: %s", e)
+
+
 async def current_location():
-    """manual pin > device fix > trip schedule > saved default."""
+    """manual pin > device fix > trip schedule > saved default. When the Mac's fix is more than 50 km from today's
+    sheet city but the newest Set location (not older than SETLOC_MAX_AGE) is within 50 km of it, the Set location
+    stands in for the Mac ("setloc"): Wi-Fi positioning can be wrong for days, a Set location is a point you chose."""
     loc = load_location()
     if loc.get("mode", "auto") != "manual":
         itin = None
@@ -1221,11 +1261,20 @@ async def current_location():
                 log.warning("itinerary location failed: %s", e)
         dev = device_location(itin)
         if dev:
-            if itin and _km(dev, itin) > 50:          # the sheet and the Mac disagree: say so
+            if itin and _km(dev, itin) > LOC_SHEET_KM:          # the sheet and the Mac disagree
+                sl = newest_set_location()
+                if sl and _km(sl, itin) <= LOC_SHEET_KM:
+                    _note_override(sl)
+                    return {"lat": round(sl["lat"], 2), "lon": round(sl["lon"], 2), "label": sl["name"],
+                            "source": "setloc"}
                 dev["schedule"] = itin["label"]
+            _note_override(None)
             return dev
+        _note_override(None)
         if itin:
             return itin
+    else:
+        _note_override(None)
     return {**loc, "source": "manual"}
 
 
