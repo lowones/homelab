@@ -7,6 +7,7 @@
 #        tv display open|close|state | tv sheet | tv place "Moab, Utah" | tv place auto
 #        tv nettest [--duration 60]   10-minute network test for video calls (see README)
 #        tv prepmove --dry-run | --resume   what Tools > Prep for move would quit; load the stopped agents again
+#        tv fixip [--check]   find the TV by its MAC and fix TV_IP if the DHCP lease moved (--check only reports)
 set -euo pipefail
 ENVF="${TV_ENV:-$(cd "$(dirname "$0")" && pwd)/tv.env}"
 if [ -f "$ENVF" ]; then set -a; . "$ENVF"; set +a; fi
@@ -34,5 +35,6 @@ case "${1:-}" in
   display) case "${2:-}" in open|close) req POST "/display/$2" ;; state) req GET /display/state ;; *) echo "usage: tv display open|close|state"; exit 1 ;; esac ;;
   place)   [ "${2:-}" = auto ] && { req POST "/display/location?auto=true"; exit; }
            req POST "/display/location?place=$(python3 -c 'import sys,urllib.parse as u;print(u.quote(sys.argv[1]))' "${2:?e.g. \"Moab, Utah\"}")" ;;
-  *) sed -n '2,9p' "$0"; exit 1 ;;
+  fixip)   if [ "${2:-}" = --check ]; then req POST "/tools/fixip?apply=0"; else req POST /tools/fixip; fi ;;
+  *) sed -n '2,10p' "$0"; exit 1 ;;
 esac

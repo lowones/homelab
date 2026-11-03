@@ -201,6 +201,28 @@ report, `latest` prints the newest folder, `--duration 60` shortens the test, Ct
 - Checks: `python3 tests/test_stops_batch.py` and `python3 tests/test_prepmove.py` (no network; stand-in osascript,
   launchctl and apps). They are not part of `smoke.sh`.
 
+## TV address drift (`fixip.py`)
+The TV's IP is a Starlink DHCP lease and has moved twice (2026-10-28, 2026-11-03). Wake-on-LAN goes by MAC, so Power on
+(and BatBoard) still work, but status, volume and Power off connect by IP and time out. Symptom: the TV wakes and the
+dashboard shows, then the phone's off button and the volume keys fail, and the log repeats `cannot reach TV at <ip>:3001`.
+- **Phone:** Tools > **Check TV address**. **Mini:** `./tv fixip` (`./tv fixip --check` only reports). Both call
+  `POST /tools/fixip[?apply=0]`.
+- What it does: (1) is the TV at `TV_IP`? (port 3001 answers, or the ARP table shows the TV's MAC there); (2) if not, it
+  sends one tiny UDP packet to every address on the Mac's own private network (read from `ifconfig`, never wider than a /22;
+  a bigger network is cut to the /24 around the Mac) so the Mac asks who has each one (ARP), twice, and looks for `TV_MAC`
+  in the ARP table; (3) when the MAC is at another address it switches `TV_IP` in the running server at once (no restart,
+  safe during a call) and rewrites only the `TV_IP` line of `tv.env`, in place, keeping the file mode and every other byte.
+  No copy of `tv.env` is made (it holds the tokens); `.run/fixip.log` gets one line per fix.
+- The MAC is the identity. Port 3001 only tells which address is awake, so a TV in standby at its new address is still found
+  (the message then says to press Power on). A MAC at two addresses with nothing to tell them apart is reported as
+  ambiguous and nothing is changed. It never wakes the TV.
+- Results (`result` in the JSON): `ok`, `fixed`, `found` (check only), `not_found` (TV off, updating, or on another Wi-Fi: look
+  at the TV itself: standby light, update, Wi-Fi), `ambiguous`, `error` (TV_MAC is not a MAC address).
+- Permission: `status`, which every default token has (admin, guest, `--display`); the car-phone `--stops` token cannot.
+  The button sits on the Tools page, which needs `display`. To be tightened when the tokens are reorganised.
+- The real fix is a DHCP reservation for the TV's MAC in the Starlink router; this tool is the safety net.
+- Checks: `python3 tests/test_fixip.py` (no network; stand-in ARP/ifconfig), plus three lines in `smoke.sh`.
+
 ## Workflow
 1. `git switch -c my-feature`
 2. Edit, then `bash tests/smoke.sh` (must print ALL PASSED)
@@ -210,7 +232,7 @@ report, `latest` prints the newest folder, `--duration 60` shortens the test, Ct
 5. Release: `git tag rv-tv-vN`. Roll back: `git checkout rv-tv-vN -- rv-tv && kickstart` as above.
 
 ## Facts
-TV `192.168.1.201` (DHCP lease, not reserved), MAC `ec:31:11:a2:e5:16`. HDMI_1 = the mini.
+TV `192.168.1.201` in a fresh `tv.env` (a DHCP lease, not reserved: it drifts, see "TV address drift"), MAC `ec:31:11:a2:e5:16`. HDMI_1 = the mini.
 Mini `pmset displaysleep` must be 0 or the TV loses signal and powers itself off.
 Guests: On/Off, Netflix, Prime, YouTube, Mac input, volume (see `GUEST_*` in `tvserver.py`); the dashboard button is opt-in.
 The mini runs the macOS Command Line Tools Python 3.9: keep the code 3.9-compatible.

@@ -3323,6 +3323,39 @@ async def prepmove_status(who: Who = Depends(need("display"))):
             "text_to_you": bool(TEXT_SELF), "now": time.time()}
 
 
+def fixip_mod():
+    """fixip.py next to this file (standard library only), imported on first use so a missing file only breaks this tool."""
+    if str(BASE) not in sys.path:
+        sys.path.insert(0, str(BASE))
+    import fixip
+    return fixip
+
+
+@app.post("/tools/fixip")
+async def fixip_run(apply: bool = Query(True), who: Who = Depends(need("status"))):
+    """Checks that the TV answers at TV_IP; if not, looks for its MAC on the Mac's own network and, when it is at another
+    address, switches to it at once and writes it to tv.env (only the TV_IP line). apply=0 only reports.
+    TODO(tokens): "status" lets every token with the default guest actions use this; tighten when the tokens are sorted out."""
+    global TV_IP
+    lock = get_lock("fixip")
+    if lock.locked():
+        raise HTTPException(409, "Already looking for the TV.")
+    async with lock:
+        fx = fixip_mod()
+        env_file = Path(os.environ.get("TV_ENV_FILE", str(BASE / "tv.env")))
+        log.info("fixip: %s asked (TV_IP %s, %s)", who.name, TV_IP, "fix" if apply else "check only")
+        loop = asyncio.get_running_loop()
+        r = await loop.run_in_executor(None, lambda: fx.check_and_fix(TV_MAC, TV_IP, TV_WS_PORT, env_file, apply))
+        if r["result"] == "fixed":
+            old, TV_IP = TV_IP, r["ip"]
+            os.environ["TV_IP"] = TV_IP                      # tv_connect() reads TV_IP on every connect: no restart needed
+            fx.log_change(RUN_DIR / "fixip.log", old, TV_IP, TV_MAC, who.name)
+            log.warning("fixip: TV moved %s -> %s (saved to tv.env: %s)", old, TV_IP, r.get("saved"))
+        else:
+            log.info("fixip: %s", r["message"])
+        return r
+
+
 class FreshStatic(StaticFiles):
     """Display files are revalidated on every load (cheap: the ETag answers 304), so a changed widget
     reaches the kiosk at once instead of whenever Chrome decides its cached copy has expired."""
@@ -3475,12 +3508,16 @@ form button{padding:12px 14px}
  <button class="wide" data-act="display" onclick="view('nettest')">Network test</button>
 </div>
 <div class="grid">
+ <button id="fx-go" class="wide" data-act="status" onclick="fixIp()">Check TV address</button>
+</div>
+<div class="grid">
  <button id="pm-go" class="wide" data-act="display" onclick="pmTap()">Prep for move</button>
 </div>
 <div class="grid">
  <button class="wide" data-act="display" onclick="pmRun(true)">Test the prep (changes nothing)</button>
 </div>
 <div class="res" id="tl-info">
+ <div class="sub" id="tl-fix"></div>
  <div class="sub" id="tl-stops"></div>
  <div class="sub" id="tl-prep"></div>
 </div>
@@ -3626,7 +3663,7 @@ function ago(t,now){
 }
 async function toolsInfo(){
   var a=document.getElementById('tl-stops'),b=document.getElementById('tl-prep');
-  a.textContent='';b.textContent='';
+  a.textContent='';b.textContent='';document.getElementById('tl-fix').textContent='';
   try{
     var r=await api('GET','/tools/stops/status');
     if(r.ok){
@@ -3651,6 +3688,20 @@ async function toolsInfo(){
       b.textContent=u.join(' ');
     }
   }catch(e){}
+}
+async function fixIp(){
+  var b=document.getElementById('fx-go'),o=document.getElementById('tl-fix');
+  b.disabled=true;o.textContent='';
+  show('Looking for the TV on the network (up to 20 s)...');
+  try{
+    var r=await api('POST','/tools/fixip');
+    if(r.status==401){show('This link is not valid any more. Ask Devon for a new one.');return}
+    if(r.status==403){show('Not allowed for your link.');return}
+    if(r.status==409){show('Already looking. Wait a few seconds.');return}
+    if(!r.ok){show('Could not check: '+(r.j.detail||r.status));return}
+    show(r.j.message||'Done.');o.textContent=r.j.message||'';
+  }catch(e){show('Cannot reach the TV box. Are you on the RV Wi-Fi?')}
+  finally{b.disabled=false}
 }
 var PM={armed:false,timer:null,tick:null,left:0};
 var PM_WINDOW=30;

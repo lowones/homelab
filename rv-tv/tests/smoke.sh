@@ -55,6 +55,9 @@ chk "admin status"                    200 -H "$A admintok" $B/status
 chk "guest status"                    200 -H "$A $G" $B/status
 chk "guest cannot list inputs"        403 -H "$A $G" $B/inputs
 chk "guest cannot list apps"          403 -H "$A $G" $B/apps
+body "fixip: TV answers where tv.env says" '"result":"ok"' -X POST -H "$A admintok" $B/tools/fixip
+chk "fixip: a guest may check the address" 200 -X POST -H "$A $G" $B/tools/fixip
+chk "fixip: no token refused"           401 -X POST $B/tools/fixip
 chk "guest input HDMI_1"              200 -X POST -H "$A $G" $B/input/HDMI_1
 chk "guest input HDMI_2 denied"       403 -X POST -H "$A $G" $B/input/HDMI_2
 chk "admin input HDMI_2"              200 -X POST -H "$A admintok" $B/input/HDMI_2
