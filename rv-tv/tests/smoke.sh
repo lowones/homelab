@@ -58,6 +58,9 @@ chk "guest cannot list apps"          403 -H "$A $G" $B/apps
 body "fixip: TV answers where tv.env says" '"result":"ok"' -X POST -H "$A admintok" $B/tools/fixip
 chk "fixip: a guest may check the address" 200 -X POST -H "$A $G" $B/tools/fixip
 chk "fixip: no token refused"           401 -X POST $B/tools/fixip
+chk "powercycle: no token refused"      401 -X POST $B/tools/powercycle
+chk "powercycle: a no-off token refused" 403 -X POST -H "$A $N" $B/tools/powercycle
+body "powercycle: no plug set up says so" 'No plug set up' -X POST -H "$A admintok" $B/tools/powercycle
 chk "guest input HDMI_1"              200 -X POST -H "$A $G" $B/input/HDMI_1
 chk "guest input HDMI_2 denied"       403 -X POST -H "$A $G" $B/input/HDMI_2
 chk "admin input HDMI_2"              200 -X POST -H "$A admintok" $B/input/HDMI_2

@@ -8,6 +8,7 @@
 #        tv nettest [--duration 60]   10-minute network test for video calls (see README)
 #        tv prepmove --dry-run | --resume   what Tools > Prep for move would quit; load the stopped agents again
 #        tv fixip [--check]   find the TV by its MAC and fix TV_IP if the DHCP lease moved (--check only reports)
+#        tv powercycle        cut the TV's power at the smart plug for ~10 s, then wake it (takes 1-3 minutes)
 set -euo pipefail
 ENVF="${TV_ENV:-$(cd "$(dirname "$0")" && pwd)/tv.env}"
 if [ -f "$ENVF" ]; then set -a; . "$ENVF"; set +a; fi
@@ -16,7 +17,7 @@ if [ "${1:-}" = nettest ]; then shift; exec python3 "$(cd "$(dirname "$0")" && p
 URL="${TV_URL:-http://${TV_BIND:-127.0.0.1}:${TV_SERVER_PORT:-8780}}"
 TOKEN="${TV_TOKEN:?TV_TOKEN not set (no tv.env found)}"
 
-req() { curl -fsS --max-time 150 -X "$1" -H "Authorization: Bearer $TOKEN" "$URL$2"; echo; }
+req() { curl -fsS --max-time "${MAXT:-150}" -X "$1" -H "Authorization: Bearer $TOKEN" "$URL$2"; echo; }
 
 case "${1:-}" in
   on)      req POST /power/on ;;
@@ -36,5 +37,6 @@ case "${1:-}" in
   place)   [ "${2:-}" = auto ] && { req POST "/display/location?auto=true"; exit; }
            req POST "/display/location?place=$(python3 -c 'import sys,urllib.parse as u;print(u.quote(sys.argv[1]))' "${2:?e.g. \"Moab, Utah\"}")" ;;
   fixip)   if [ "${2:-}" = --check ]; then req POST "/tools/fixip?apply=0"; else req POST /tools/fixip; fi ;;
-  *) sed -n '2,10p' "$0"; exit 1 ;;
+  powercycle) MAXT=300 req POST /tools/powercycle ;;
+  *) sed -n '2,11p' "$0"; exit 1 ;;
 esac

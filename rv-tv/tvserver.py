@@ -14,6 +14,7 @@ Display feature: POST /display/open puts a fullscreen dashboard on the Mac's scr
 is the TV when the TV is on HDMI_1); POST /display/close removes it.
   TV_DISPLAY_BROWSER  path to a Chrome/Brave/Edge/Firefox binary (default: first one found)
   TV_MAC_INPUT        the TV input the Mac is on (default HDMI_1)
+  SHELLY_PLUG_HOST    host name or IP of the smart plug the TV is plugged into (Tools > Power cycle TV)
   TV_WEATHER_URL      weather API base (default Open-Meteo, no key needed)
 """
 import asyncio
@@ -77,6 +78,12 @@ KEYFILE = Path(os.environ.get("TV_KEYFILE", str(BASE / "tv_key.txt")))
 BIND = os.environ.get("TV_BIND", "127.0.0.1")
 SERVER_PORT = int(os.environ.get("TV_SERVER_PORT", "8780"))
 MAC_INPUT = os.environ.get("TV_MAC_INPUT", "HDMI_1")
+PLUG_HOST = os.environ.get("SHELLY_PLUG_HOST", "").strip()
+PC_OFF_S = 10                # how long the plug holds the TV's power off (the plug turns itself back on)
+PC_SETTLE = PC_OFF_S + 2     # seconds before the first wake packet: the TV must have lost power and the plug restored it
+PC_WAIT = 120                # then wait this long for the TV to answer ...
+PC_RETRY_WAIT = 45           # ... and this long again after Check TV address when it did not
+PC_COOLDOWN = 300            # seconds between power cycles: a mashed button must not cycle the TV over and over
 DISPLAY_DIR = BASE / "display"
 RUN_DIR = BASE / ".run"
 STATE_FILE = Path(os.environ.get("TV_DISPLAY_FILE", str(BASE / "display.json")))
@@ -3356,6 +3363,80 @@ async def fixip_run(apply: bool = Query(True), who: Who = Depends(need("status")
         return r
 
 
+def powercycle_mod():
+    """powercycle.py next to this file (standard library only), imported on first use like fixip.py."""
+    if str(BASE) not in sys.path:
+        sys.path.insert(0, str(BASE))
+    import powercycle
+    return powercycle
+
+
+_pc = {"last": 0.0}          # when the plug was last told to cut the power (monotonic-free: wall clock is enough here)
+
+
+@app.post("/tools/powercycle")
+async def powercycle_run(who: Who = Depends(need("power_off"))):
+    """Cuts the TV's power at the smart plug for PC_OFF_S seconds (the plug brings it back itself), then waits for the
+    TV, wakes it, switches to MAC_INPUT. If the TV does not come back it runs Check TV address once and waits again.
+    Takes 1 to 3 minutes. Only on a tap: nothing in the server calls this by itself.
+    Permission: power_off (whoever can switch the TV off can cycle it). One at a time (409); PC_COOLDOWN apart (429)."""
+    lock = get_lock("powercycle")
+    if lock.locked():
+        raise HTTPException(409, "Already power cycling the TV.")
+    async with lock:
+        if not PLUG_HOST:
+            raise HTTPException(400, "No plug set up: add SHELLY_PLUG_HOST to tv.env and restart the service.")
+        ago = time.time() - _pc["last"]
+        if ago < PC_COOLDOWN:
+            raise HTTPException(429, "The TV was power cycled %d s ago. Wait %d s." % (ago, PC_COOLDOWN - ago + 1))
+        pc = powercycle_mod()
+        log.warning("powercycle: %s asked (plug %s)", who.name, PLUG_HOST)
+        loop = asyncio.get_running_loop()
+        try:
+            cut = await loop.run_in_executor(None, lambda: pc.cycle(PLUG_HOST, PC_OFF_S))
+        except pc.PlugError as e:
+            log.warning("powercycle: plug not reached: %s", e)
+            pc.log_cycle(RUN_DIR / "powercycle.log", who.name, "plug_unreachable", None)
+            return {"result": "plug_unreachable", "plug_was_on": None,
+                    "message": "Could not reach the plug (%s). Nothing was changed: the TV still has power." % e}
+        _pc["last"] = t0 = time.time()
+        await asyncio.sleep(PC_SETTLE)
+        up, problem = False, ""
+        try:
+            up = await wake_tv(PC_WAIT, check_first=False)
+            if not up:
+                try:
+                    moved = await fixip_run(apply=True, who=who)
+                    problem = " " + moved.get("message", "")
+                except HTTPException:
+                    pass
+                up = await wake_tv(PC_RETRY_WAIT, check_first=False)
+        except TVError as e:
+            problem = " " + str(e)
+        took = int(time.time() - t0)
+        result = "ok" if up else "tv_not_back"
+        note = ""
+        if cut["action"] == "turned_on":
+            note = " The plug was off, so it was turned on instead of cycled."
+        if up:
+            for attempt in (1, 2):
+                try:
+                    await call("ssap://tv/switchInput", {"inputId": MAC_INPUT})
+                    break
+                except (TVError, TVUnreachable) as e:
+                    if attempt == 2:
+                        note += " Could not switch to %s (%s)." % (MAC_INPUT, e)
+                    else:
+                        await asyncio.sleep(3)
+            msg = "Power cycled. The TV answered again after about %d s.%s" % (took, note)
+        else:
+            msg = ("The plug cycled but the TV is not answering after %d s.%s%s Look at the TV itself (standby light, an "
+                   "update, the Wi-Fi), then try Power on." % (took, note, problem))
+        log.warning("powercycle: %s after %d s", result, took)
+        pc.log_cycle(RUN_DIR / "powercycle.log", who.name, result, took if up else None)
+        return {"result": result, "plug_was_on": cut["was_on"], "seconds": took, "message": msg}
+
+
 class FreshStatic(StaticFiles):
     """Display files are revalidated on every load (cheap: the ETag answers 304), so a changed widget
     reaches the kiosk at once instead of whenever Chrome decides its cached copy has expired."""
@@ -3511,6 +3592,9 @@ form button{padding:12px 14px}
  <button id="fx-go" class="wide" data-act="status" onclick="fixIp()">Check TV address</button>
 </div>
 <div class="grid">
+ <button id="pc-go" class="wide" data-act="power_off" onclick="pcTap()">Power cycle TV</button>
+</div>
+<div class="grid">
  <button id="pm-go" class="wide" data-act="display" onclick="pmTap()">Prep for move</button>
 </div>
 <div class="grid">
@@ -3518,6 +3602,7 @@ form button{padding:12px 14px}
 </div>
 <div class="res" id="tl-info">
  <div class="sub" id="tl-fix"></div>
+ <div class="sub" id="tl-pc"></div>
  <div class="sub" id="tl-stops"></div>
  <div class="sub" id="tl-prep"></div>
 </div>
@@ -3701,6 +3786,40 @@ async function fixIp(){
     if(!r.ok){show('Could not check: '+(r.j.detail||r.status));return}
     show(r.j.message||'Done.');o.textContent=r.j.message||'';
   }catch(e){show('Cannot reach the TV box. Are you on the RV Wi-Fi?')}
+  finally{b.disabled=false}
+}
+var PC={armed:false,timer:null,tick:null,left:0};
+var PC_WINDOW=15;
+function pcReset(){
+  PC.armed=false;if(PC.timer){clearTimeout(PC.timer);PC.timer=null}
+  if(PC.tick){clearInterval(PC.tick);PC.tick=null}
+  var b=document.getElementById('pc-go');b.textContent='Power cycle TV';b.classList.remove('on');
+}
+function pcTap(){
+  if(!PC.armed){
+    PC.armed=true;
+    var b=document.getElementById('pc-go');b.classList.add('on');
+    PC.left=PC_WINDOW;b.textContent='Tap again to cut TV power ('+PC.left+' s)';
+    PC.tick=setInterval(function(){PC.left--;if(PC.left>0)b.textContent='Tap again to cut TV power ('+PC.left+' s)'},1000);
+    PC.timer=setTimeout(function(){pcReset();show('Power cycle cancelled.')},PC_WINDOW*1000);
+    var h=new Date().getHours();
+    show('This cuts the TV power for about 10 seconds. The screen goes black for 1 to 3 minutes.'+(h>=6&&h<12?' It is call time: do this only if the TV is really stuck.':''));
+    return;
+  }
+  pcReset();pcRun();
+}
+async function pcRun(){
+  var b=document.getElementById('pc-go'),o=document.getElementById('tl-pc');
+  b.disabled=true;o.textContent='';
+  show('Cutting the TV power. It should be back in 1 to 3 minutes. Keep this page open.');
+  try{
+    var r=await api('POST','/tools/powercycle');
+    if(r.status==401){show('This link is not valid any more. Ask Devon for a new one.');return}
+    if(r.status==403){show('Not allowed for your link.');return}
+    if(r.status==409){show('Already power cycling. Wait.');return}
+    if(!r.ok){show(r.j.detail||('Could not power cycle: '+r.status));return}
+    show(r.j.message||'Done.');o.textContent=r.j.message||'';
+  }catch(e){show('Lost contact with the TV box. The power cycle may still be running: wait 3 minutes, then check the TV.')}
   finally{b.disabled=false}
 }
 var PM={armed:false,timer:null,tick:null,left:0};
