@@ -9,7 +9,7 @@ The second form matters: the plug does the "on again" itself, so the cycle compl
 
 Standard library only (Python 3.9 compatible). tvserver.py calls cycle() from POST /tools/powercycle (it does the waiting
 for the TV, the wake packet and the input switch); ./tv powercycle is the command-line way to the same endpoint.
-This module never touches the TV, only the plug.
+This module never touches the TV, only the plug. info() / describe() are read-only (Tools > Check TV plug).
 """
 import http.client
 import json
@@ -79,3 +79,91 @@ def log_cycle(path, who, result, seconds):
                 time.strftime("%Y-%m-%d %H:%M:%S%z"), who, result, "-" if seconds is None else "%ds" % seconds))
     except OSError:
         pass
+
+
+def info(host, timeout=4.0):
+    """Everything Tools > Check TV plug shows, read-only. Switch status is required (PlugError without it); the rest
+    (config, device info, Wi-Fi signal) is best effort and left as None when the plug does not answer it.
+    Returns a dict: on, watts, volts, temp_c, source, initial_state, auto_on, auto_off, auth (True = a password is set),
+    firmware, mac, rssi, warnings (list of sentences)."""
+    st = status(host, timeout)
+    out = {"on": bool(st.get("output")), "watts": st.get("apower"), "volts": st.get("voltage"),
+           "temp_c": (st.get("temperature") or {}).get("tC"), "source": st.get("source"),
+           "initial_state": None, "auto_on": None, "auto_off": None, "auth": None, "firmware": None, "mac": None,
+           "rssi": None}
+    try:
+        cfg = _get(host, "/rpc/Switch.GetConfig", {"id": 0}, timeout)
+        out["initial_state"] = cfg.get("initial_state")
+        out["auto_on"] = cfg.get("auto_on")
+        out["auto_off"] = cfg.get("auto_off")
+    except (PlugError, AttributeError):
+        pass
+    try:
+        dev = _get(host, "/rpc/Shelly.GetDeviceInfo", None, timeout)
+        out["auth"] = bool(dev.get("auth_en"))
+        out["firmware"] = dev.get("ver")
+        out["mac"] = dev.get("mac")
+    except (PlugError, AttributeError):
+        pass
+    try:
+        whole = _get(host, "/rpc/Shelly.GetStatus", None, timeout)
+        out["rssi"] = (whole.get("wifi") or {}).get("rssi")
+    except (PlugError, AttributeError):
+        pass
+    w = []
+    if not out["on"]:
+        w.append("The plug is off, so the TV has no power. Switch it on in the Shelly app, or tap Power cycle TV (it turns an off plug on).")
+    elif isinstance(out["watts"], (int, float)) and out["watts"] < 2:
+        w.append("The plug is on but delivering under 2 W: the TV is off, or something else is plugged in here.")
+    if out["initial_state"] is not None and out["initial_state"] != "on":
+        w.append("After a power failure the plug will NOT switch itself on (initial_state is %s). Set it to on." % out["initial_state"])
+    if out["auto_off"]:
+        w.append("The auto-off timer is on: the plug would cut the TV's power by itself.")
+    if isinstance(out["rssi"], (int, float)) and out["rssi"] < -75:
+        w.append("Weak Wi-Fi signal at the plug (%d dBm): commands may be slow or fail." % out["rssi"])
+    if isinstance(out["temp_c"], (int, float)) and out["temp_c"] > 60:
+        w.append("The plug is hot (%.0f C)." % out["temp_c"])
+    out["warnings"] = w
+    return out
+
+
+def last_cycle(path):
+    """The last line of .run/powercycle.log as a short sentence, or None when there is none."""
+    try:
+        lines = [ln.strip() for ln in Path(path).read_text().splitlines() if ln.strip()]
+    except OSError:
+        return None
+    if not lines:
+        return None
+    m = re.match(r"^(\S+) (\d\d:\d\d:\d\d)\S* by (\S+) result (\S+) tv_back_after (\S+)$", lines[-1])
+    if not m:
+        return lines[-1][:120]
+    day, clock, who, result, back = m.groups()
+    return "%s %s by %s: %s%s" % (day, clock, who, result.replace("_", " "), "" if back == "-" else ", TV back after " + back)
+
+
+def describe(i, last, cooldown_left):
+    """The lines the phone and ./tv plug print. i is info()'s dict, last is last_cycle()'s sentence or None."""
+    def num(v, unit, nd=1):
+        return "-" if not isinstance(v, (int, float)) else ("%." + str(nd) + "f %s") % (v, unit)
+    lines = ["Plug: %s, %s, %s, %s" % ("on" if i["on"] else "OFF", num(i["watts"], "W"), num(i["volts"], "V", 0),
+                                         num(i["temp_c"], "C", 0))]
+    extra = []
+    if isinstance(i.get("rssi"), (int, float)):
+        r = i["rssi"]
+        extra.append("Wi-Fi %d dBm (%s)" % (r, "good" if r >= -60 else "ok" if r >= -75 else "weak"))
+    if i.get("firmware"):
+        extra.append("firmware " + str(i["firmware"]))
+    if extra:
+        lines.append(", ".join(extra))
+    st = i.get("initial_state")
+    if st is not None:
+        lines.append("After a power failure: %s. Auto-on timer: %s, auto-off timer: %s." % (
+            "switches itself on" if st == "on" else "stays " + str(st), "on" if i.get("auto_on") else "off",
+            "on" if i.get("auto_off") else "off"))
+    if i.get("auth") is not None:
+        lines.append("Password: " + ("set" if i["auth"] else "none (anyone on the RV Wi-Fi can switch the plug)"))
+    lines.append("Last power cycle: " + (last or "none logged"))
+    lines.append("Power cycle ready." if cooldown_left <= 0 else "Next power cycle allowed in %d s." % cooldown_left)
+    lines.extend("\u25b2 " + w for w in i.get("warnings", []))
+    return lines
