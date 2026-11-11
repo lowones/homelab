@@ -242,7 +242,12 @@ Starlink lease, the name follows it). The plug's local API needs no hub, cloud a
 - Plug settings (set 2026-11-11): `initial_state` on (it comes back on after a power failure), auto-on and auto-off off, LED
   off (`PLUGS_UI.SetConfig` `leds.mode` `off`), no auth yet (anyone on the RV network can switch it), firmware 1.7.99: do not
   update it on a travel day.
-- Checks: `python3 tests/test_powercycle.py` (stand-in plug, no network), plus three lines in `smoke.sh`.
+- **Check TV plug** (Tools, or `./tv plug`; `GET /tools/plug`, permission `status`): read-only. Shows whether the plug
+  answers, on/off, watts (the TV draws about 90 W when on, so 0 W means the TV is off or not on this plug), volts,
+  temperature, Wi-Fi signal, firmware, `initial_state`, the auto timers, whether a password is set, the last power cycle
+  and how long until the next is allowed. Warns when the plug is off, `initial_state` is not `on`, auto-off is on, the
+  signal is weak or the plug is hot. Changes nothing.
+- Checks: `python3 tests/test_powercycle.py` (stand-in plug, no network), plus five lines in `smoke.sh`.
 
 ## Workflow
 1. `git switch -c my-feature`

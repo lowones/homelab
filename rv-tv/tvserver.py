@@ -3374,6 +3374,26 @@ def powercycle_mod():
 _pc = {"last": 0.0}          # when the plug was last told to cut the power (monotonic-free: wall clock is enough here)
 
 
+@app.get("/tools/plug")
+async def plug_check(who: Who = Depends(need("status"))):
+    """Tools > Check TV plug: read-only status of the smart plug (on/off, watts, volts, Wi-Fi, the settings that matter) and
+    of the last power cycle. Changes nothing, so it is safe at any time. Permission: status, like Check TV address."""
+    if not PLUG_HOST:
+        raise HTTPException(400, "No plug set up: add SHELLY_PLUG_HOST to tv.env and restart the service.")
+    pc = powercycle_mod()
+    loop = asyncio.get_running_loop()
+    left = max(0, int(PC_COOLDOWN - (time.time() - _pc["last"])))
+    last = pc.last_cycle(RUN_DIR / "powercycle.log")
+    try:
+        i = await loop.run_in_executor(None, lambda: pc.info(PLUG_HOST))
+    except pc.PlugError as e:
+        msg = "Could not reach the plug (%s). The TV may still have power: look at it." % e
+        return {"result": "plug_unreachable", "reachable": False, "warnings": [msg], "lines": ["\u25b2 " + msg,
+                "Last power cycle: " + (last or "none logged")]}
+    return dict(i, result="warn" if i["warnings"] else "ok", reachable=True, last_cycle=last, cooldown_left=left,
+                lines=pc.describe(i, last, left))
+
+
 @app.post("/tools/powercycle")
 async def powercycle_run(who: Who = Depends(need("power_off"))):
     """Cuts the TV's power at the smart plug for PC_OFF_S seconds (the plug brings it back itself), then waits for the
@@ -3592,6 +3612,9 @@ form button{padding:12px 14px}
  <button id="fx-go" class="wide" data-act="status" onclick="fixIp()">Check TV address</button>
 </div>
 <div class="grid">
+ <button id="pg-go" class="wide" data-act="status" onclick="plugCheck()">Check TV plug</button>
+</div>
+<div class="grid">
  <button id="pc-go" class="wide" data-act="power_off" onclick="pcTap()">Power cycle TV</button>
 </div>
 <div class="grid">
@@ -3602,6 +3625,7 @@ form button{padding:12px 14px}
 </div>
 <div class="res" id="tl-info">
  <div class="sub" id="tl-fix"></div>
+ <div class="sub" id="tl-plug"></div>
  <div class="sub" id="tl-pc"></div>
  <div class="sub" id="tl-stops"></div>
  <div class="sub" id="tl-prep"></div>
@@ -3785,6 +3809,21 @@ async function fixIp(){
     if(r.status==409){show('Already looking. Wait a few seconds.');return}
     if(!r.ok){show('Could not check: '+(r.j.detail||r.status));return}
     show(r.j.message||'Done.');o.textContent=r.j.message||'';
+  }catch(e){show('Cannot reach the TV box. Are you on the RV Wi-Fi?')}
+  finally{b.disabled=false}
+}
+async function plugCheck(){
+  var b=document.getElementById('pg-go'),o=document.getElementById('tl-plug');
+  b.disabled=true;o.textContent='';o.style.whiteSpace='pre-line';
+  show('Asking the plug...');
+  try{
+    var r=await api('GET','/tools/plug');
+    if(r.status==401){show('This link is not valid any more. Ask Devon for a new one.');return}
+    if(r.status==403){show('Not allowed for your link.');return}
+    if(!r.ok){show(r.j.detail||('Could not check: '+r.status));return}
+    var L=r.j.lines||[];
+    show(r.j.result=='ok'?'Plug is fine.':(r.j.result=='warn'?'Plug answers, but check the notes below.':'Plug did not answer.'));
+    o.textContent=L.join('\\n');
   }catch(e){show('Cannot reach the TV box. Are you on the RV Wi-Fi?')}
   finally{b.disabled=false}
 }

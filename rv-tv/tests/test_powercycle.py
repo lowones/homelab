@@ -35,6 +35,10 @@ def check(name, ok, extra=""):
 class Plug(BaseHTTPRequestHandler):
     on = True
     notshelly = False
+    watts = 90.6
+    cfg = {"id": 0, "initial_state": "on", "auto_on": False, "auto_off": False}
+    dev = {"id": "shellyplugusg4-98c37700cfd8", "mac": "98C37700CFD8", "ver": "1.7.99-plugusg4prod1", "auth_en": False}
+    whole = {"wifi": {"sta_ip": "192.168.1.35", "status": "got ip", "rssi": -52}}
     requests = []
 
     def log_message(self, *a):
@@ -45,7 +49,14 @@ class Plug(BaseHTTPRequestHandler):
         q = {k: v[0] for k, v in parse_qs(u.query).items()}
         Plug.requests.append((u.path, q))
         if u.path == "/rpc/Switch.GetStatus":
-            body = {"hello": 1} if Plug.notshelly else {"id": 0, "source": "SHC", "output": Plug.on, "apower": 0.0}
+            body = {"hello": 1} if Plug.notshelly else {"id": 0, "source": "SHC", "output": Plug.on, "apower": Plug.watts if Plug.on else 0.0,
+                                                        "voltage": 121.5, "temperature": {"tC": 43.4, "tF": 110.1}}
+        elif u.path == "/rpc/Switch.GetConfig":
+            body = Plug.cfg
+        elif u.path == "/rpc/Shelly.GetDeviceInfo":
+            body = Plug.dev
+        elif u.path == "/rpc/Shelly.GetStatus":
+            body = Plug.whole
         elif u.path == "/rpc/Switch.Set":
             body = {"was_on": Plug.on}
             if q.get("on") == "true":
@@ -113,6 +124,52 @@ lines = lg.read_text().splitlines()
 check("the cycle is logged without secrets", "by devon result ok tv_back_after 47s" in lines[0]
       and "result plug_unreachable tv_back_after -" in lines[1], lines)
 
+# ---- Check TV plug: info(), describe(), last_cycle() --------------------------------------------------------------
+Plug.on, Plug.watts, Plug.requests = True, 90.6, []
+i = pcm.info(HOST)
+check("info: reads status, config, device info and Wi-Fi", i["on"] is True and i["watts"] == 90.6 and i["volts"] == 121.5 and i["temp_c"] == 43.4
+      and i["initial_state"] == "on" and i["auto_off"] is False and i["auth"] is False and i["firmware"].startswith("1.7.99") and i["rssi"] == -52, i)
+check("info: a healthy plug has no warnings", i["warnings"] == [], i["warnings"])
+check("info: changes nothing (only reads)", all(p != "/rpc/Switch.Set" for p, q in Plug.requests), Plug.requests)
+Plug.cfg = dict(Plug.cfg, initial_state="off", auto_off=True)
+Plug.whole = {"wifi": {"rssi": -80}}
+i2 = pcm.info(HOST)
+check("info: warns about initial_state, auto-off and a weak signal", len(i2["warnings"]) == 3 and any("initial_state is off" in w for w in i2["warnings"])
+      and any("auto-off" in w for w in i2["warnings"]) and any("-80" in w for w in i2["warnings"]), i2["warnings"])
+Plug.cfg = dict(Plug.cfg, initial_state="on", auto_off=False)
+Plug.whole = {"wifi": {"rssi": -52}}
+Plug.on = False
+i3 = pcm.info(HOST)
+check("info: an off plug says the TV has no power", i3["on"] is False and any("no power" in w for w in i3["warnings"]), i3["warnings"])
+Plug.on, Plug.watts = True, 0.4
+i4 = pcm.info(HOST)
+check("info: 0 W with the plug on says the TV is off or elsewhere", any("under 2 W" in w for w in i4["warnings"]), i4["warnings"])
+Plug.watts = 90.6
+Plug.dev = {}
+Plug.whole = {}
+i5 = pcm.info(HOST)
+check("info: the best-effort parts may be missing without failing", i5["on"] is True and i5["firmware"] is None and i5["rssi"] is None and i5["auth"] is False, i5)
+Plug.dev = {"id": "x", "mac": "98C37700CFD8", "ver": "1.7.99-plugusg4prod1", "auth_en": True}
+Plug.whole = {"wifi": {"rssi": -52}}
+try:
+    pcm.info(DEAD, timeout=1)
+    check("info: an unreachable plug raises PlugError", False)
+except pcm.PlugError:
+    check("info: an unreachable plug raises PlugError", True)
+lg2 = TMP / "pc2.log"
+check("last_cycle: no file gives None", pcm.last_cycle(lg2) is None)
+pcm.log_cycle(lg2, "devon", "ok", 37)
+check("last_cycle: a good cycle reads as a sentence", pcm.last_cycle(lg2).endswith("by devon: ok, TV back after 37s"), pcm.last_cycle(lg2))
+pcm.log_cycle(lg2, "devon", "tv_not_back", None)
+check("last_cycle: the newest line wins and 'not back' has no time", pcm.last_cycle(lg2).endswith("by devon: tv not back"), pcm.last_cycle(lg2))
+d = pcm.describe(i, "2026-11-11 13:46:01 by devon: ok, TV back after 37s", 0)
+check("describe: shows state, watts, Wi-Fi, firmware, settings, password, last cycle, ready",
+      d[0].startswith("Plug: on, 90.6 W, 122 V, 43 C") and any("-52 dBm (good)" in x for x in d) and any("switches itself on" in x for x in d)
+      and any("Password: none" in x for x in d) and any("TV back after 37s" in x for x in d) and d[-1] == "Power cycle ready.", d)
+d = pcm.describe(i2, None, 140)
+check("describe: warnings are listed last, cooldown and 'none logged' shown",
+      d[-1].startswith("\u25b2") and any("none logged" in x for x in d) and any("Next power cycle allowed in 140 s." == x for x in d), d)
+
 # ---- the endpoint -------------------------------------------------------------------------------------------------
 spec = importlib.util.spec_from_file_location("tvserver", ROOT / "tvserver.py")
 tv = importlib.util.module_from_spec(spec)
@@ -129,6 +186,8 @@ page = tv.GUEST_PAGE
 check("the phone page has the button, gated on the power_off permission, and the result line",
       'id="pc-go"' in page and 'data-act="power_off"' in page and 'onclick="pcTap()"' in page and 'id="tl-pc"' in page)
 check("the page script calls the new endpoint and arms with a first tap", "api('POST','/tools/powercycle')" in page and "function pcTap()" in page)
+check("the phone page has the Check TV plug button on the status permission and its own result line",
+      'id="pg-go"' in page and 'onclick="plugCheck()"' in page and 'id="tl-plug"' in page and "api('GET','/tools/plug')" in page)
 node = shutil.which("node")
 if node:
     js = page[page.index("<script>") + 8:page.index("</script>")]
@@ -235,6 +294,39 @@ with TestClient(tv.app) as cl:
     check("plug unreachable: 200, plug_unreachable, nothing changed, no waiting",
           r.status_code == 200 and j["result"] == "plug_unreachable" and "Nothing was changed" in j["message"] and not calls["wake"], (r.status_code, j))
     check("... and the cooldown is NOT started (the power was never cut)", tv._pc["last"] == 0.0)
+
+    # Check TV plug (read-only)
+    reset()
+    tv.PLUG_HOST = ""
+    r = cl.get("/tools/plug", headers=H("t"))
+    check("plug check, no SHELLY_PLUG_HOST: 400", r.status_code == 400 and "SHELLY_PLUG_HOST" in r.text, (r.status_code, r.text))
+    tv.PLUG_HOST = HOST
+    check("plug check, no token: 401", cl.get("/tools/plug").status_code == 401)
+    check("plug check, car-phone token: 403", cl.get("/tools/plug", headers=H("c")).status_code == 403)
+    Plug.cfg = {"id": 0, "initial_state": "on", "auto_on": False, "auto_off": False}
+    Plug.whole = {"wifi": {"rssi": -52}}
+    Plug.requests = []
+    pcm.log_cycle(TMP / "powercycle.log", "guest", "ok", 37)
+    r = cl.get("/tools/plug", headers=H("g"))
+    j = r.json()
+    check("plug check, default guest: 200, ok, reachable, with the lines for the phone",
+          r.status_code == 200 and j["result"] == "ok" and j["reachable"] is True and j["watts"] == 90.6 and j["lines"][0].startswith("Plug: on, 90.6 W"), (r.status_code, r.text))
+    check("plug check changes nothing: no Switch.Set, cooldown not started", all(p != "/rpc/Switch.Set" for p, q in Plug.requests) and tv._pc["last"] == 0.0)
+    check("plug check shows the last power cycle from the log", j["last_cycle"] and "by guest" in j["last_cycle"], j["last_cycle"])
+    Plug.cfg = dict(Plug.cfg, initial_state="restore_last")
+    j = cl.get("/tools/plug", headers=H("t")).json()
+    check("plug check with a risky setting: result warn and the warning is in the lines",
+          j["result"] == "warn" and any("initial_state is restore_last" in x for x in j["lines"]), j)
+    Plug.cfg = dict(Plug.cfg, initial_state="on")
+    tv._pc["last"] = tv.time.time() - 100
+    j = cl.get("/tools/plug", headers=H("t")).json()
+    check("plug check shows the cooldown still running", 190 <= j["cooldown_left"] <= 201 and any("Next power cycle allowed in" in x for x in j["lines"]), j)
+    tv._pc["last"] = 0.0
+    tv.PLUG_HOST = DEAD
+    r = cl.get("/tools/plug", headers=H("t"))
+    j = r.json()
+    check("plug check, plug unreachable: 200, plug_unreachable, says to look at the TV",
+          r.status_code == 200 and j["result"] == "plug_unreachable" and j["reachable"] is False and "look at it" in j["warnings"][0], (r.status_code, j))
 
     reset()
     tv.PLUG_HOST = HOST

@@ -9,6 +9,7 @@
 #        tv prepmove --dry-run | --resume   what Tools > Prep for move would quit; load the stopped agents again
 #        tv fixip [--check]   find the TV by its MAC and fix TV_IP if the DHCP lease moved (--check only reports)
 #        tv powercycle        cut the TV's power at the smart plug for ~10 s, then wake it (takes 1-3 minutes)
+#        tv plug              status of the smart plug the TV is on (changes nothing)
 set -euo pipefail
 ENVF="${TV_ENV:-$(cd "$(dirname "$0")" && pwd)/tv.env}"
 if [ -f "$ENVF" ]; then set -a; . "$ENVF"; set +a; fi
@@ -38,5 +39,6 @@ case "${1:-}" in
            req POST "/display/location?place=$(python3 -c 'import sys,urllib.parse as u;print(u.quote(sys.argv[1]))' "${2:?e.g. \"Moab, Utah\"}")" ;;
   fixip)   if [ "${2:-}" = --check ]; then req POST "/tools/fixip?apply=0"; else req POST /tools/fixip; fi ;;
   powercycle) MAXT=300 req POST /tools/powercycle ;;
-  *) sed -n '2,11p' "$0"; exit 1 ;;
+  plug)    req GET /tools/plug | python3 -c 'import sys,json; print("\n".join(json.load(sys.stdin)["lines"]))' ;;
+  *) sed -n '2,12p' "$0"; exit 1 ;;
 esac
