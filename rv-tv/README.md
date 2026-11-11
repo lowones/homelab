@@ -223,6 +223,27 @@ dashboard shows, then the phone's off button and the volume keys fail, and the l
 - The real fix is a DHCP reservation for the TV's MAC in the Starlink router; this tool is the safety net.
 - Checks: `python3 tests/test_fixip.py` (no network; stand-in ARP/ifconfig), plus three lines in `smoke.sh`.
 
+## Power cycle TV (`powercycle.py`, Shelly plug)
+When the TV stops answering (frozen webOS, stuck standby) the only fix is cutting its power. The TV is plugged into a Shelly
+Plug US Gen4 (`SHELLY_PLUG_HOST` in `tv.env`, the plug's mDNS name `shellyplugusg4-<mac>.local`; its IP changes with the
+Starlink lease, the name follows it). The plug's local API needs no hub, cloud account or Matter.
+- **Phone:** Tools > **Power cycle TV** (tap twice: the first tap arms it for 15 s). **Mini:** `./tv powercycle`. Both call
+  `POST /tools/powercycle`. It takes 1 to 3 minutes and the request stays open until it is done.
+- What it does: (1) reads the plug (`Switch.GetStatus`); if the plug does not answer it stops and nothing is changed;
+  (2) `Switch.Set?on=false&toggle_after=10`: power off now and the plug itself switches back on after 10 s, even if the
+  connection drops. If the plug was already off it is turned on instead; (3) waits 12 s, then sends wake packets and waits up
+  to 120 s for the TV to answer; (4) if it does not, runs Check TV address once and waits 45 s more; (5) when the TV
+  answers it switches to `TV_MAC_INPUT` (HDMI_1).
+- Results (`result` in the JSON): `ok`, `tv_not_back` (look at the TV itself), `plug_unreachable` (nothing was changed).
+  Errors: 400 no `SHELLY_PLUG_HOST`, 409 already running, 429 within 5 minutes of the last cycle. `.run/powercycle.log` gets
+  one line per cycle with how long the TV took to answer.
+- Permission: `power_off`, the same as the Power off button. It runs only on a tap, never by itself. Do not use it during a
+  webOS update (a power cut mid-update can hurt the TV): if the TV was updating, wait.
+- Plug settings (set 2026-11-11): `initial_state` on (it comes back on after a power failure), auto-on and auto-off off, LED
+  off (`PLUGS_UI.SetConfig` `leds.mode` `off`), no auth yet (anyone on the RV network can switch it), firmware 1.7.99: do not
+  update it on a travel day.
+- Checks: `python3 tests/test_powercycle.py` (stand-in plug, no network), plus three lines in `smoke.sh`.
+
 ## Workflow
 1. `git switch -c my-feature`
 2. Edit, then `bash tests/smoke.sh` (must print ALL PASSED)
