@@ -3688,10 +3688,7 @@ form button{padding:12px 14px}
 </div>
 <div id="v-main">
 <div class="grid">
- <button data-act="app" onclick="go('/app/netflix','Opening Netflix...')">Netflix</button>
- <button data-act="app" onclick="go('/app/amazon','Opening Prime Video...')">Prime Video</button>
- <button data-act="app" onclick="go('/app/youtube.leanback.v4','Opening YouTube...')">YouTube</button>
- <button data-act="input" onclick="go('/input/HDMI_1','Switching to the Mac...')">Mac screen</button>
+ <button class="wide" data-act="input" onclick="go('/input/HDMI_1','Switching to the Mac...')">Mac screen</button>
 </div>
 <div class="grid">
  <div class="bb" id="bb" role="button" tabindex="0" data-act="display" onclick="batboard()"
@@ -3714,6 +3711,17 @@ form button{padding:12px 14px}
  <button>Set</button>
  <button type="button" onclick="go('/display/location?auto=true','Weather now follows the Mac location, then the trip schedule...')">Follow location</button>
 </form>
+<div class="grid">
+ <button class="wide" data-act="app" onclick="view('apps')">TV apps</button>
+</div>
+</div>
+<div id="v-apps" hidden>
+<div class="grid">
+ <button data-act="app" onclick="go('/app/netflix','Opening Netflix...')">Netflix</button>
+ <button data-act="app" onclick="go('/app/amazon','Opening Prime Video...')">Prime Video</button>
+ <button data-act="app" onclick="go('/app/youtube.leanback.v4','Opening YouTube...')">YouTube</button>
+ <button onclick="view('main')">Back</button>
+</div>
 </div>
 <div id="v-cam" hidden>
 <div class="grid">
@@ -3919,7 +3927,7 @@ async function batboard(){
 }
 var CUR='main', ntTimer=null;
 function view(v){
-  var titles={main:'RV TV',cam:'BatCam',canny:'Canny',tools:'Tools',check:'Check/Debug',nettest:'Network test',site:'Set location',report:'Report'};
+  var titles={main:'RV TV',cam:'BatCam',canny:'Canny',tools:'Tools',check:'Check/Debug',apps:'TV apps',nettest:'Network test',site:'Set location',report:'Report'};
   Object.keys(titles).forEach(function(n){document.getElementById('v-'+n).hidden=(n!==v)});
   document.getElementById('title').textContent=titles[v];
   document.title=titles[v];
