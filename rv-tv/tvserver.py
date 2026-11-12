@@ -3747,23 +3747,12 @@ form button{padding:12px 14px}
 </div>
 <div id="v-tools" hidden>
 <div class="grid">
- <button class="wide" data-act="display" onclick="view('nettest')">Network test</button>
+ <button data-act="display" onclick="view('nettest')">Network test</button>
+ <button data-act="status" onclick="view('check')">Check/Debug</button>
+ <button id="pc-go" data-act="power_off" onclick="pcTap()">Power cycle TV</button>
+ <button id="pm-go" data-act="display" onclick="pmTap()">Prep for move</button>
 </div>
-<div class="grid">
- <button id="fx-go" class="wide" data-act="status" onclick="fixIp()">Check TV address</button>
-</div>
-<div class="grid">
- <button id="pg-go" class="wide" data-act="status" onclick="plugCheck()">Check TV plug</button>
-</div>
-<div class="grid">
- <button id="pc-go" class="wide" data-act="power_off" onclick="pcTap()">Power cycle TV</button>
-</div>
-<div class="grid">
- <button id="pm-go" class="wide" data-act="display" onclick="pmTap()">Prep for move</button>
-</div>
-<div class="grid">
- <button class="wide" data-act="display" onclick="pmRun(true)">Test the prep (changes nothing)</button>
-</div>
+<div id="tl-box">
 <div class="res" id="pm-copy" hidden>
  <div class="sub">Destination</div>
  <div class="v" id="pm-addr"></div>
@@ -3776,9 +3765,19 @@ form button{padding:12px 14px}
  <div class="sub" id="tl-stops"></div>
  <div class="sub" id="tl-prep"></div>
 </div>
+</div>
 <div class="grid">
  <button class="wide" data-act="display" onclick="home()">Home</button>
 </div>
+</div>
+<div id="v-check" hidden>
+<div class="grid">
+ <button id="fx-go" data-act="status" onclick="fixIp()">Check TV address</button>
+ <button id="pg-go" data-act="status" onclick="plugCheck()">Check TV plug</button>
+ <button data-act="display" onclick="pmRun(true)">Test the prep</button>
+ <button onclick="view('tools')">Back</button>
+</div>
+<div id="tl-slot"></div>
 </div>
 <div id="v-nettest" hidden>
 <div class="grid">
@@ -3920,16 +3919,21 @@ async function batboard(){
 }
 var CUR='main', ntTimer=null;
 function view(v){
-  var titles={main:'RV TV',cam:'BatCam',canny:'Canny',tools:'Tools',nettest:'Network test',site:'Set location',report:'Report'};
+  var titles={main:'RV TV',cam:'BatCam',canny:'Canny',tools:'Tools',check:'Check/Debug',nettest:'Network test',site:'Set location',report:'Report'};
   Object.keys(titles).forEach(function(n){document.getElementById('v-'+n).hidden=(n!==v)});
   document.getElementById('title').textContent=titles[v];
   document.title=titles[v];
   CUR=v;
-  document.getElementById('tvctl').hidden=(v==='report'||v==='site');   // the report and the map get the whole screen
+  document.getElementById('tvctl').hidden=['report','site','tools','check'].indexOf(v)>=0;   // these get the whole screen
+  // one results box, shared by Tools and Check/Debug
+  var box=document.getElementById('tl-box');
+  if(v==='check')document.getElementById('tl-slot').appendChild(box);
+  else if(v==='tools')document.getElementById('v-tools').insertBefore(box,document.getElementById('v-tools').lastElementChild);
   if(ntTimer){clearInterval(ntTimer);ntTimer=null}
   if(v==='cam')show('BatCam: press Login if the cameras say 401, then Load.');
   else if(v==='canny'){show('Canny: pick a camera.');loadCams()}
   else if(v==='tools'){show('Tools');toolsInfo()}
+  else if(v==='check'){show('Check/Debug');toolsInfo()}
   else if(v==='nettest'){ntRefresh();ntTimer=setInterval(ntRefresh,3000)}
   else if(v==='report'||v==='site'){}
   else refresh();
