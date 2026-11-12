@@ -3641,6 +3641,10 @@ form button{padding:12px 14px}
 .bar i{display:block;height:100%;width:0;background:var(--acc);transition:width .6s linear}
 #rep{width:100%;height:calc(100vh - 140px);min-height:460px;border:1px solid var(--line);border-radius:12px;background:transparent}
 .bb-ticks b{position:absolute;top:12px;transform:translateX(-50%);font-size:11px;font-weight:500;opacity:.75}
+.bb.off{opacity:.5}
+.bb-row{display:flex;align-items:flex-start;gap:6px;margin-top:2px;cursor:default}
+.bb-row .bb-s{flex:1;min-width:0;margin-top:0}
+.bb-n{flex:none;width:36px;height:28px;padding:0;font-size:20px;line-height:1;border-radius:8px}
 #site-map{height:46vh;min-height:300px;border:1px solid var(--line);border-radius:12px;margin:0 0 10px;background:#222}
 .sp{width:26px;height:26px;border-radius:50%;border:2px solid #fff;background:#2a5bd7;color:#fff;font:700 13px/22px system-ui,sans-serif;text-align:center;box-shadow:0 1px 4px #0009}
 .sp.car{background:#d67a00}.sp.mac{background:#555}.sp.site{background:#1a9c55}.sp.drop{background:#9b30d0}
@@ -3662,8 +3666,20 @@ form button{padding:12px 14px}
  <button data-act="power_off" onclick="go('/power/off','Turning off...')">Power off</button>
 </div>
 <div class="grid">
- <button data-act="volume" onclick="go('/volume/down','')">Vol &minus;</button>
- <button data-act="volume" onclick="go('/volume/up','')">Vol +</button>
+ <div class="bb" id="vol" role="button" tabindex="0" data-act="volume" onclick="volSet()"
+      onkeydown="if(event.key==='Enter')volSet()" onpointerdown="this.classList.add('down')"
+      onpointerup="this.classList.remove('down')" onpointerleave="this.classList.remove('down')"
+      onpointercancel="this.classList.remove('down')">
+  <div class="bb-h"><span>Volume</span><span id="volv">-</span></div>
+  <div class="bb-row" onclick="event.stopPropagation()" onpointerdown="event.stopPropagation()">
+   <button class="bb-n" aria-label="Volume down one step" onclick="volStep(-1)">&lsaquo;</button>
+   <div class="bb-s">
+    <input type="range" id="volr" min="0" max="100" step="1" value="0" aria-label="TV volume">
+    <div class="bb-ticks" id="volt"></div>
+   </div>
+   <button class="bb-n" aria-label="Volume up one step" onclick="volStep(1)">&rsaquo;</button>
+  </div>
+ </div>
 </div>
 <div class="grid">
  <button data-act="mute" onclick="go('/mute/on','')">Mute</button>
@@ -3856,15 +3872,40 @@ async function go(path,msg){
 }
 var BB={touched:false};
 function bbShow(){document.getElementById('bbv').textContent=document.getElementById('bbr').value+' miles'}
-function bbInit(){
+function bbTicks(id,lo,hi,label){
   var h='';
-  for(var m=10;m<=100;m+=5){
-    var x=((m-10)/90*100).toFixed(3);
+  for(var m=lo;m<=hi;m+=5){
+    var x=((m-lo)/(hi-lo)*100).toFixed(3);
     h+='<i'+(m%10===0?' class="m"':'')+' style="left:'+x+'%"></i>';
-    if(m%20===10||m===100)h+='<b style="left:'+x+'%">'+m+'</b>';
+    if(label(m))h+='<b style="left:'+x+'%">'+m+'</b>';
   }
-  document.getElementById('bbt').innerHTML=h;
+  document.getElementById(id).innerHTML=h;
+}
+function bbInit(){
+  bbTicks('bbt',10,100,function(m){return m%20===10||m===100});
   document.getElementById('bbr').oninput=function(){BB.touched=true;bbShow()};
+  bbTicks('volt',0,100,function(m){return m%20===0});
+  document.getElementById('volr').oninput=function(){VOL.touched=true;volShow()};
+}
+var VOL={touched:false,tv:null,muted:false};
+function volShow(){
+  var v=document.getElementById('volr').value, t;
+  if(VOL.tv==null)t='TV off';
+  else if(VOL.touched)t=v+' - tap to set';
+  else t=v+(VOL.muted?' (muted)':'');
+  document.getElementById('volv').textContent=t;
+  document.getElementById('vol').classList.toggle('off',VOL.tv==null);
+}
+function volSet(){
+  var v=document.getElementById('volr').value;
+  VOL.touched=false;VOL.tv=+v;volShow();
+  go('/volume/'+v,'Volume '+v+'...');
+}
+function volStep(d){
+  if(VOL.tv==null){go(d>0?'/volume/up':'/volume/down','');return}
+  VOL.touched=false;VOL.tv=Math.max(0,Math.min(100,VOL.tv+d));
+  document.getElementById('volr').value=VOL.tv;volShow();
+  go(d>0?'/volume/up':'/volume/down','');
 }
 async function batboard(){
   var m=document.getElementById('bbr').value;
@@ -4327,6 +4368,9 @@ async function refresh(){
     var j=r.j, line;
     if(j.power!='on'){line='TV is off'}
     else{line='TV is on'+(j.volume!=null?' - volume '+j.volume:'')+(j.muted?' (muted)':'')}
+    VOL.tv=j.power=='on'&&j.volume!=null?j.volume:null;VOL.muted=!!j.muted;
+    if(VOL.tv!=null&&!VOL.touched)document.getElementById('volr').value=VOL.tv;
+    volShow();
     if(can('display')){
       var d=await api('GET','/display/state');
       if(d.ok&&d.j.open)line+=d.j.page==='sheet'?' - sheet open on the Mac':' - dashboard open';
