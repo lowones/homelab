@@ -116,6 +116,7 @@ LOC_PARK_AGE = 3 * 3600      # ... when it is no older than this
 LOC_RUN_KM = 5.0             # held fixes this close to each other count as one steady run
 LOC_SUSTAIN = max(10, int(os.environ.get("TV_LOC_SUSTAIN_MIN", "120"))) * 60   # a run this long is believed
 LOC_TRUSTED_MAX_AGE = 6 * 3600   # a last good fix older than this no longer vetoes anything
+LOC_PIN_MAX_AGE = float(os.environ.get("TV_LOC_PIN_DAYS", "14")) * 86400   # an "RV is here" pin from the phone lasts this long
 SETLOC_MAX_AGE = max(1.0, float(os.environ.get("TV_SETLOC_MAX_AGE_H", "48"))) * 3600   # how long a Set location stays good
 # Optional: the page the "Open sheet" button shows on the Mac's screen.
 SHEET_URL = os.environ.get("TV_SHEET_URL", "").strip()
@@ -260,7 +261,7 @@ GUEST_ACTIONS = ["status", "power_on", "power_off", "input", "volume", "mute", "
 GUEST_INPUTS = {"HDMI_1"}                      # guests may only switch to the Mac
 GUEST_APPS = {"netflix", "amazon", "youtube.leanback.v4"}
 _tok_cache = {"mtime": None, "data": {}}
-ALL_ACTIONS = GUEST_ACTIONS + ["display", "display_data", "stops", "admin"]
+ALL_ACTIONS = GUEST_ACTIONS + ["display", "display_data", "stops", "location", "admin"]
 _display = {"token": None, "proc": None, "browser": None, "page": None,   # the running kiosk, if any
             "batcam": None}                                                # id of the Safari window BatCam opened
 
@@ -1021,7 +1022,11 @@ def _km(a, b):
     return 6371 * 2 * math.asin(math.sqrt(h))
 
 
-def judge_fix(fix, trusted, held, sheet, parks):
+def pin_active(pin, now):
+    return pin is not None and 0 <= now - pin["at"] <= LOC_PIN_MAX_AGE
+
+
+def judge_fix(fix, trusted, held, sheet, parks, pin=None):
     """Decide whether a new location fix is believed. Returns ('accept' | 'hold', reason).
 
     fix and trusted are {'lat','lon','at'} (at = epoch seconds); trusted is the last fix that was believed, or None.
@@ -1032,8 +1037,24 @@ def judge_fix(fix, trusted, held, sheet, parks):
     something else backs it up: it is at today's sheet city (a move day arrival), it matches a recent phone park, or
     it has stayed put for LOC_SUSTAIN. The last of these does not apply while the sheet says the RV is at the last
     good fix: a wrong Wi-Fi database entry can repeat the same wrong place for hours, so then only the age limit on
-    the last good fix (LOC_TRUSTED_MAX_AGE) lets a far fix through. A manual pin (tv place) overrides all of it."""
+    the last good fix (LOC_TRUSTED_MAX_AGE) lets a far fix through. A manual pin (tv place) overrides all of it.
+
+    pin is the phone's "RV is here" ({'lat','lon','at'}), true GPS someone stood at. While it is active
+    (LOC_PIN_MAX_AGE) a far fix needs real move evidence: a phone park, or today's sheet city when the pin is not
+    already there. Neither a steady run nor the age of the last good fix is enough against it."""
     now = fix["at"]
+    if pin_active(pin, now):
+        if _km(fix, pin) <= LOC_JUMP_KM:
+            return "accept", "near the RV location set on the phone"
+        if sheet and _km(fix, sheet) <= LOC_SHEET_KM and _km(pin, sheet) > LOC_SHEET_KM:
+            return "accept", "at today's sheet city (moved from the phone's RV location)"
+        for p in parks:
+            try:
+                if 0 <= now - float(p["at"]) <= LOC_PARK_AGE and _km(fix, p) <= LOC_PARK_KM:
+                    return "accept", "matches a phone park (moved from the phone's RV location)"
+            except (KeyError, TypeError, ValueError):
+                continue
+        return "hold", "%d km from the RV location set on the phone" % round(_km(fix, pin))
     if trusted is None:
         return "accept", "first fix"
     if now - trusted["at"] > LOC_TRUSTED_MAX_AGE:
@@ -1062,7 +1083,7 @@ def judge_fix(fix, trusted, held, sheet, parks):
         round(jump), "and the sheet says the RV is there" if sheet_here else "and nothing else backs it up")
 
 
-_fixstate = {"stamp": None, "trusted": None, "held": [], "loaded": False, "outcome": None, "raw": None}
+_fixstate = {"stamp": None, "trusted": None, "held": [], "loaded": False, "outcome": None, "raw": None, "pin": None}
 _itin_seen = {"date": None, "loc": None}      # today's sheet city, remembered for callers that did not look it up
 
 
@@ -1072,6 +1093,48 @@ def _trusted_file():
 
 def _rejected_file():
     return LOCATION_FILE.with_name("location_rejected.log")
+
+
+def _pin_file():
+    return LOCATION_FILE.with_name("location_pin.json")
+
+
+def _load_pin():
+    try:
+        d = json.loads(_pin_file().read_text())
+        return {"lat": float(d["lat"]), "lon": float(d["lon"]), "acc": float(d.get("acc") or 0),
+                "city": str(d.get("city") or ""), "region": str(d.get("region") or ""), "at": float(d["at"]),
+                "by": str(d.get("by") or "")}
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+def _save_pin(pin):
+    """None removes the pin."""
+    try:
+        p = _pin_file()
+        if pin is None:
+            p.unlink(missing_ok=True)
+            return
+        tmp = p.with_suffix(".tmp")
+        tmp.write_text(json.dumps(pin))
+        os.replace(tmp, p)
+    except OSError as e:
+        log.warning("could not save the RV location pin: %s", e)
+
+
+def _load_fixstate(sheet=None):
+    s = _fixstate
+    if not s["loaded"]:
+        s["trusted"] = _load_trusted() or _bootstrap_trusted(sheet)
+        s["pin"] = _load_pin()
+        s["loaded"] = True
+    return s
+
+
+def _active_pin():
+    pin = _fixstate["pin"]
+    return pin if pin_active(pin, time.time()) else None
 
 
 def _load_trusted():
@@ -1151,22 +1214,20 @@ def _sheet_now(itin=None):
 def _judged_fix(itin=None):
     """The Mac's position after judge_fix, exact ({'lat','lon','acc','city','region','at'}), or None when the
     file is missing, unreadable, stale (file age) or too coarse. A fix is judged once, when the agent writes it;
-    while a far fix is held back this stays the last good one."""
+    while a far fix is held back this stays the last good one. An active "RV is here" pin from the phone is
+    returned instead of the Mac's fix, and even when the Mac has no fix at all."""
+    sheet = _sheet_now(itin)
+    s = _load_fixstate(sheet)
     try:
         st = LOCATION_FILE.stat()
         raw = LOCATION_FILE.read_text().strip()
         parts = raw.split("|") + [""] * 5
         lat, lon, acc = float(parts[0]), float(parts[1]), float(parts[2])
     except (OSError, ValueError):
-        return None
+        return _active_pin()
     if (time.time() - st.st_mtime > DEVICE_MAX_AGE or not (-90 <= lat <= 90 and -180 <= lon <= 180)
             or not (0 <= acc <= DEVICE_MAX_ACC)):
-        return None
-    sheet = _sheet_now(itin)
-    s = _fixstate
-    if not s["loaded"]:
-        s["trusted"] = _load_trusted() or _bootstrap_trusted(sheet)
-        s["loaded"] = True
+        return _active_pin()
     stamp = (st.st_mtime_ns, raw)
     if s["stamp"] != stamp:
         s["stamp"] = stamp
@@ -1178,19 +1239,44 @@ def _judged_fix(itin=None):
                 parks = _stops_read()["parks"]
             except Exception:
                 parks = []
-        verdict, why = judge_fix(fix, s["trusted"], s["held"], sheet, parks)
+        pin = _active_pin()
+        if pin and _km(fix, pin) > LOC_JUMP_KM:
+            try:
+                parks = _stops_read()["parks"]
+            except Exception:
+                parks = []
+        verdict, why = judge_fix(fix, s["trusted"], s["held"], sheet, parks, pin)
         if verdict == "accept":
             if s["held"]:
                 log.info("location: believing the new fix again (%s) after %d held back", why, len(s["held"]))
+            if pin and _km(fix, pin) > LOC_JUMP_KM:
+                log.info("location: the RV moved away from the phone's RV location (%s); pin cleared", why)
+                s["pin"] = None
+                _save_pin(None)
             s.update(trusted=fix, held=[], outcome="accepted")
             _save_trusted(fix)
         else:
             s["held"] = (s["held"] + [(fix["at"], lat, lon)])[-40:]
             s["outcome"] = "held"
             _note_rejected(fix, why)
+            keep = _active_pin() or s["trusted"]
             log.warning("location: held back a fix at %.4f,%.4f (%s); still using %.4f,%.4f",
-                        lat, lon, why, s["trusted"]["lat"], s["trusted"]["lon"])
-    return s["trusted"]
+                        lat, lon, why, keep["lat"], keep["lon"])
+    return _active_pin() or s["trusted"]
+
+
+def set_rv_pin(lat, lon, acc, city, region, by):
+    """The phone's "RV is here": believed over the Mac's Wi-Fi fix until real move evidence or LOC_PIN_MAX_AGE.
+    Also becomes the last good fix, so nettest.py tags runs with it."""
+    s = _load_fixstate()
+    pin = {"lat": lat, "lon": lon, "acc": acc, "city": city, "region": region, "at": time.time(), "by": by}
+    s.update(pin=pin, trusted={k: pin[k] for k in ("lat", "lon", "acc", "city", "region", "at")}, held=[],
+             outcome="accepted")
+    _save_pin(pin)
+    _save_trusted(s["trusted"])
+    log.info("location: %s set the RV location to %.5f,%.5f (+-%d m) %s", by, lat, lon, round(acc),
+             ", ".join(x for x in (city, region) if x))
+    return pin
 
 
 def _fix_label(t):
@@ -1223,8 +1309,8 @@ def device_location(itin=None):
     if not label and sheet and _km(t, sheet) <= LOC_SHEET_KM:       # a fix restored from history has no town name
         label = sheet["label"]
     label = label or f"{t['lat']:.2f}, {t['lon']:.2f}"
-    out = {"lat": round(t["lat"], 2), "lon": round(t["lon"], 2), "label": label, "source": "device",
-           "accuracy": round(t["acc"])}
+    out = {"lat": round(t["lat"], 2), "lon": round(t["lon"], 2), "label": label,
+           "source": "phone" if t is _fixstate["pin"] else "device", "accuracy": round(t["acc"])}
     if _fixstate["outcome"] == "held":
         out["held"] = len(_fixstate["held"])
     return out
@@ -1282,7 +1368,7 @@ async def current_location():
                 log.warning("itinerary location failed: %s", e)
         dev = device_location(itin)
         if dev:
-            if itin and _km(dev, itin) > LOC_SHEET_KM:          # the sheet and the Mac disagree
+            if itin and _km(dev, itin) > LOC_SHEET_KM and dev["source"] != "phone":   # the sheet and the Mac disagree
                 sl = newest_set_location()
                 if sl and _km(sl, itin) <= LOC_SHEET_KM:
                     _note_override(sl)
@@ -3060,6 +3146,31 @@ async def set_location(place: str = Query("", max_length=80),
     return loc
 
 
+@app.post("/location/rv")
+async def rv_is_here(lat: float = Query(..., ge=-90, le=90), lon: float = Query(..., ge=-180, le=180),
+                     acc: float = Query(0, ge=0, le=5000), city: str = Query("", max_length=60),
+                     region: str = Query("", max_length=60), who: Who = Depends(need("location"))):
+    """BatBelt's "RV is here": the phone's GPS position becomes the RV's location. Unlike a manual pin
+    (POST /display/location) it lets go on its own when the RV really moves (see judge_fix). A manual pin
+    in place is switched back to following the location."""
+    if load_location().get("mode") == "manual":
+        save_state(mode="auto")
+    pin = await asyncio.get_running_loop().run_in_executor(
+        None, set_rv_pin, lat, lon, acc, city.strip(), region.strip(), who.name)
+    _weather["next"] = 0.0
+    return {"pin": pin, "shown": await current_location()}
+
+
+@app.get("/location/rv")
+async def rv_location(who: Who = Depends(need("location"))):
+    """What BatBelt's Location tab shows: the active pin (or null), where the dashboard is, what the Mac says."""
+    shown = await current_location()
+    _load_fixstate()
+    raw = _fixstate.get("raw")
+    return {"pin": _active_pin(), "pin_days": LOC_PIN_MAX_AGE / 86400, "shown": shown,
+            "mac": {k: raw[k] for k in ("lat", "lon", "acc", "at")} if raw else None}
+
+
 COPY_ON_OPEN = os.environ.get("TV_COPY_ON_OPEN", "on").strip().lower() not in ("off", "0", "no", "false")
 
 
@@ -4222,6 +4333,8 @@ def token_cmd(args):
             acts.append("display")      # may open and close the dashboard on the Mac
         if "--stops" in args:
             acts = ["stops"]            # the phone's parking automation: nothing else
+        if "--location" in args:
+            acts += [a for a in ("stops", "location") if a not in acts]   # BatBelt: reports stays, sets "RV is here"
         if acts != GUEST_ACTIONS:
             rec["actions"] = acts
         data[name] = rec
@@ -4244,7 +4357,7 @@ def token_cmd(args):
     elif cmd == "link" and len(args) >= 2 and args[1] in data:
         print(f"{base_url()}/guest#{data[args[1]]['token']}")
     else:
-        sys.exit("usage: tvserver.py token add NAME [--no-off] [--display] [--stops] | revoke NAME | list | link NAME")
+        sys.exit("usage: tvserver.py token add NAME [--no-off] [--display] [--stops] [--location] | revoke NAME | list | link NAME")
 
 
 def log_config_with_times():
