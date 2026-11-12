@@ -3336,6 +3336,7 @@ IS_MAC = sys.platform == "darwin"
 PREP_ON = os.environ.get("TV_PREPMOVE", "on").strip().lower() not in ("off", "0", "no", "false")
 PREP_KEEP = [x.strip() for x in os.environ.get("TV_PREP_KEEP", "").split(",") if x.strip()]   # more app names to leave open
 PREP_JOB = "com.lowone.prepmove"
+PREP_DEST_TIMEOUT = 8.0          # seconds the prep reply waits for the destination the phone copies
 _prep = {"running": False, "started": 0.0, "task": None}
 
 
@@ -3432,7 +3433,20 @@ async def prepmove_start(dry_run: bool = Query(False), who: Who = Depends(need("
     _prep["task"] = asyncio.get_running_loop().create_task(prep_flow(dry_run))      # kept so it is not collected
     log.info("%s: prepmove %s", who.name, "dry run" if dry_run else "START")
     return {"started": True, "dry_run": dry_run, "text_to_you": bool(TEXT_SELF), "text_to_friend": bool(TEXT_TO),
-            "tv_off": not dry_run}
+            "tv_off": not dry_run, "destination": await prep_destination()}
+
+
+async def prep_destination():
+    """The destination the prep texts, for the phone to put on its own clipboard: {"address", "label", "date"},
+    or None when there is none or the lookup is slow (a cold route cache must not hold up the reply)."""
+    try:
+        nav = await asyncio.wait_for(get_nav(), timeout=PREP_DEST_TIMEOUT)
+    except Exception as e:
+        log.info("prepmove: no destination for the phone (%s)", str(e)[:80] or type(e).__name__)
+        return None
+    t = (nav or {}).get("target") or {}
+    text = t.get("address") or t.get("label")
+    return {"address": text, "label": t.get("label"), "date": t.get("date")} if text else None
 
 
 @app.get("/tools/prepmove/status")
@@ -3734,6 +3748,11 @@ form button{padding:12px 14px}
 <div class="grid">
  <button class="wide" data-act="display" onclick="pmRun(true)">Test the prep (changes nothing)</button>
 </div>
+<div class="res" id="pm-copy" hidden>
+ <div class="sub">Destination</div>
+ <div class="v" id="pm-addr"></div>
+ <button style="width:100%;margin-top:8px" onclick="copyAddr()">Copy</button>
+</div>
 <div class="res" id="tl-info">
  <div class="sub" id="tl-fix"></div>
  <div class="sub" id="tl-plug"></div>
@@ -3991,6 +4010,26 @@ function pmTap(){
   }
   pmReset();pmRun(false);
 }
+var pmAddr='';
+function bbCopy(t){
+  var h=window.webkit&&window.webkit.messageHandlers&&window.webkit.messageHandlers.batbelt;
+  if(!h)return false;
+  h.postMessage({copy:t});return true;
+}
+function copyAddr(){
+  var ta=document.createElement('textarea');ta.value=pmAddr;ta.setAttribute('readonly','');
+  ta.style.position='fixed';ta.style.opacity='0';document.body.appendChild(ta);
+  ta.select();ta.setSelectionRange(0,ta.value.length);
+  var ok=false;try{ok=document.execCommand('copy')}catch(e){}
+  document.body.removeChild(ta);
+  show(ok?'Copied: '+pmAddr:'Could not copy. Press and hold the address to copy it.');
+}
+function pmDest(d){
+  var box=document.getElementById('pm-copy');
+  if(!d||!d.address){box.hidden=true;return ''}
+  pmAddr=d.address;document.getElementById('pm-addr').textContent=d.address;box.hidden=false;
+  return bbCopy(d.address)?' Copied the address.':' Tap Copy below for the address.';
+}
 async function pmRun(dry){
   show(dry?'Testing the prep...':'Starting the prep...');
   try{
@@ -3999,8 +4038,9 @@ async function pmRun(dry){
     if(r.status==403){show('Not allowed for your link.');return}
     if(r.status==409){show('Already prepping.');return}
     if(!r.ok){show('Could not start: '+(r.j.detail||r.status));return}
-    if(dry){show('Testing. Results show here in about 30 seconds.');setTimeout(toolsInfo,20000);setTimeout(toolsInfo,40000)}
-    else show('Prepping. This page goes quiet in about a minute'+(r.j.text_to_you?', then you get a text when the mini is ready.':'. No TV_TEXT_SELF is set, so no text will come: wait 2 minutes before cutting power.'));
+    var c=pmDest(r.j.destination);
+    if(dry){show('Testing. Results show here in about 30 seconds.'+c);setTimeout(toolsInfo,20000);setTimeout(toolsInfo,40000)}
+    else show('Prepping. This page goes quiet in about a minute'+(r.j.text_to_you?', then you get a text when the mini is ready.':'. No TV_TEXT_SELF is set, so no text will come: wait 2 minutes before cutting power.')+c);
   }catch(e){show('Cannot reach the TV box. Are you on the RV Wi-Fi?')}
 }
 function ntClock(s){s=Math.max(0,Math.round(s));return Math.floor(s/60)+':'+('0'+(s%60)).slice(-2)}

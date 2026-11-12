@@ -291,6 +291,9 @@ try:
         check("dry run: replies at once and runs the helper in dry-run mode", r.status_code == 200 and r.json()["dry_run"] and ok
               and p and p["dry_run"] is True, (r.status_code, r.text, p))
         check("dry run: no friend text, no TV off, kiosk left alone", cap["friend"] == 0 and cap["off"] == 0 and cap["kiosk"] == 0, cap)
+        check("dry run: the reply carries the destination for the phone's clipboard",
+              r.json().get("destination") == {"address": "1 Main St, Cloverdale, OR", "label": "Cloverdale, OR", "date": "2026-10-23"},
+              r.json())
         cap["plan"] = None
         r = cl.post("/tools/prepmove/start", headers=A)
         ok = wait_done()
@@ -323,9 +326,23 @@ try:
             return {}
         tv.get_nav = no_nav
         cap["plan"] = None
-        cl.post("/tools/prepmove/start", headers=A)
+        r = cl.post("/tools/prepmove/start", headers=A)
         wait_done()
         check("no destination: the text just has no link", cap["plan"] and cap["plan"]["destination_text"] is None, cap["plan"])
+        check("no destination: the reply says so (null)", r.status_code == 200 and r.json()["destination"] is None, r.text)
+        async def slow_nav():
+            await _sleep(2)
+            return NAV
+        tv.get_nav, tv.PREP_DEST_TIMEOUT = slow_nav, 0.2
+        t0 = time.time()
+        r = cl.post("/tools/prepmove/start?dry_run=1", headers=A)
+        check("a slow destination lookup does not hold up the reply", r.status_code == 200 and r.json()["destination"] is None
+              and time.time() - t0 < 1.5, (r.text, time.time() - t0))
+        wait_done()
+        tv.get_nav = no_nav
+        page = cl.get("/guest").text
+        check("the phone page copies through BatBelt and falls back to a Copy button",
+              "messageHandlers.batbelt" in page and 'id="pm-copy"' in page and "execCommand('copy')" in page)
         # status
         (TMP / "run").mkdir(exist_ok=True)
         (TMP / "run" / "prepmove-report.json").write_text(json.dumps({"at": time.time(), "dry_run": True, "quit": ["Safari"], "refused": []}))
