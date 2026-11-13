@@ -3737,6 +3737,10 @@ form button{padding:12px 14px}
 #rep{width:100%;height:calc(100vh - 140px);min-height:460px;border:1px solid var(--line);border-radius:12px;background:transparent}
 .bb-ticks b{position:absolute;top:12px;transform:translateX(-50%);font-size:11px;font-weight:500;opacity:.75}
 .bb.off{opacity:.5}
+#tvctl{padding:4px;margin-bottom:10px;border:1px solid var(--line);border-radius:14px}
+#tvctl .grid{gap:4px;margin-bottom:4px}
+#tvctl .grid:last-child{margin-bottom:0}
+#tvctl button,#tvctl .bb{border-radius:9px}
 .bb-row{display:flex;align-items:flex-start;gap:6px;margin-top:2px;cursor:default}
 .bb-row .bb-s{flex:1;min-width:0;margin-top:0}
 .bb-n{flex:none;width:36px;height:28px;padding:0;font-size:20px;line-height:1;border-radius:8px}
