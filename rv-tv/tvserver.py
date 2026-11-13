@@ -2026,6 +2026,10 @@ STOP_KEEP = 20000                                                 # visits kept 
 PARK_LOG_KEEP = 300                                               # car park spots kept for Tools > Set location
 STOP_PINS_MAX = 2000                                              # pins sent to the map, newest first
 STOPS_FILE = RUN_DIR / "stops.json"
+STOP_SRC_KEEP = 3000        # received events kept in stop_sources.json, with who sent them, for comparing phones
+CMP_STAY_MIN = 15           # BatBelt reports a stay after this many minutes; shorter Shortcuts parks are not compared
+CMP_MATCH_MIN = 20          # a park from each side this close in time ...
+CMP_MATCH_M = 300           # ... and in space is the same stop
 LOCATION_HISTORY_FILE = Path(os.environ.get("TV_LOCATION_HISTORY") or LOCATION_FILE.with_name("location_history.log"))
 STOP_MAX_AGE_DAYS = 60      # an uploaded event older than this is dropped
 STOP_FUTURE_SLACK = 300     # seconds: a phone clock this far ahead is clamped to now
@@ -2485,7 +2489,7 @@ def _stop_apply(d, ev):
     return {"event": "drive", "logged": logged, "minutes": round(mins)}
 
 
-def stops_ingest(events, now=None):
+def stops_ingest(events, now=None, src=None):
     """Blocking. Takes uploaded events (dicts with event, at, lat, lon) in any order and applies them
     in time order. Safe to send twice: an event already seen is acknowledged and ignored, and one older
     than the newest event already applied is skipped. Every result carries ok=True when the phone may
@@ -2519,12 +2523,97 @@ def stops_ingest(events, now=None):
                     d["last_at"] = max(d["last_at"], ev["at"])
                 results[i] = res
         d["seen"] = seen[-400:]
+        if src:
+            _stop_src_add([{"src": src, "event": ev["event"], "at": ev["at"], "got": now,
+                            "lat": None if ev["lat"] is None else round(ev["lat"], 5),
+                            "lon": None if ev["lon"] is None else round(ev["lon"], 5),
+                            "result": next((k for k in ("duplicate", "skipped") if k in results[i]), "applied")}
+                           for _at, i, ev in prepared])
         applied = sum(1 for r in results if r and "duplicate" not in r and "skipped" not in r and "dropped" not in r)
         d["last_upload"] = {"at": now, "received": len(events), "applied": applied,
                             "newest": max([e[0] for e in prepared], default=None)}
         d["last_error"] = None
         _stops_write(d)
     return results
+
+
+def _stop_src_file():
+    return RUN_DIR / "stop_sources.json"     # read at call time so tests that move RUN_DIR stay out of the live one
+
+
+def _stop_src_read():
+    try:
+        return list(json.loads(_stop_src_file().read_text()))
+    except (OSError, ValueError, TypeError):
+        return []
+
+
+def _stop_src_add(rows):
+    """Called under _stops_lock."""
+    if not rows:
+        return
+    data = (_stop_src_read() + rows)[-STOP_SRC_KEEP:]
+    RUN_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = _stop_src_file().with_suffix(".tmp")
+    fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        json.dump(data, f)
+    os.replace(tmp, _stop_src_file())
+
+
+def stops_compare(days=7, now=None, a="carphone", b="batbelt"):
+    """Parks sent by token `a` (the Volt Shortcuts) matched against parks sent by `b` (BatBelt), from the source
+    log, so a park the stop log skipped as already seen still counts. Only `a` parks that lasted CMP_STAY_MIN
+    (or whose end is unknown) are compared, since BatBelt reports nothing shorter; parks younger than
+    CMP_STAY_MIN + 15 min are left out because BatBelt may not have sent them yet."""
+    now = time.time() if now is None else now
+    rows = _stop_src_read()
+    cut = now - days * 86400
+    a_rows = sorted((r for r in rows if r.get("src") == a), key=lambda r: r["at"])
+    b_parks = [r for r in rows if r.get("src") == b and r["event"] == "park" and r["at"] >= cut - CMP_MATCH_MIN * 60]
+    used, both, only_a = set(), [], []
+    for i, r in enumerate(a_rows):
+        if r["event"] != "park" or r["at"] < cut or now - r["at"] < (CMP_STAY_MIN + 15) * 60:
+            continue
+        nxt = a_rows[i + 1] if i + 1 < len(a_rows) else None
+        mins = (nxt["at"] - r["at"]) / 60 if nxt and nxt["event"] == "drive" else None
+        if mins is not None and mins < CMP_STAY_MIN:
+            continue
+        best = None
+        for j, q in enumerate(b_parks):
+            if j in used or abs(q["at"] - r["at"]) > CMP_MATCH_MIN * 60:
+                continue
+            m = _km(q, r) * 1000
+            if m <= CMP_MATCH_M and (best is None or m < best[1]):
+                best = (j, m)
+        item = {"at": r["at"], "mins": None if mins is None else round(mins), "lat": r["lat"], "lon": r["lon"]}
+        if best:
+            used.add(best[0])
+            item.update(late_min=round((b_parks[best[0]]["at"] - r["at"]) / 60), off_m=round(best[1]))
+            both.append(item)
+        else:
+            only_a.append(item)
+    only_b = [{"at": q["at"], "lat": q["lat"], "lon": q["lon"]} for j, q in enumerate(b_parks)
+              if j not in used and q["at"] >= cut]
+    return {"days": days, "since": min((r["got"] for r in rows), default=None),
+            "both": both, "only_a": only_a, "only_b": only_b, "a": a, "b": b}
+
+
+def stops_compare_cmd(args):
+    days = int(args[1]) if len(args) > 1 and args[1].isdigit() else 7
+    c = stops_compare(days)
+    t = lambda x: time.strftime("%a %m-%d %H:%M", time.localtime(x))
+    if c["since"] is None:
+        print("No uploads logged by source yet.")
+        return
+    print("Logging by source since %s. Last %d days, Shortcuts parks of %d min or more:" % (t(c["since"]), days, CMP_STAY_MIN))
+    print("  both: %d   only Shortcuts (BatBelt missed): %d   only BatBelt: %d" % (len(c["both"]), len(c["only_a"]), len(c["only_b"])))
+    for x in c["both"]:
+        print("  both      %s  %s min  BatBelt %+d min, %d m off" % (t(x["at"]), x["mins"] if x["mins"] is not None else "?", x["late_min"], x["off_m"]))
+    for x in c["only_a"]:
+        print("  MISSED    %s  %s min  %.4f,%.4f" % (t(x["at"]), x["mins"] if x["mins"] is not None else "?", x["lat"], x["lon"]))
+    for x in c["only_b"]:
+        print("  BatBelt   %s  %.4f,%.4f" % (t(x["at"]), x["lat"], x["lon"]))
 
 
 def stop_event(event, lat, lon, at=None):
@@ -2606,7 +2695,7 @@ async def stop_endpoint(request: Request, event: str = Query(None, pattern="^(pa
         events = body if isinstance(body, list) else [body]
         if len(events) > 500:
             raise HTTPException(413, "at most 500 events at a time")
-        results = await loop.run_in_executor(None, stops_ingest, events)
+        results = await loop.run_in_executor(None, stops_ingest, events, None, who.name)
         if isinstance(body, list):
             return {"ok": True, "received": len(events), "results": results}
         return results[0]
@@ -2614,7 +2703,7 @@ async def stop_endpoint(request: Request, event: str = Query(None, pattern="^(pa
         raise HTTPException(400, "send event=park|drive in the query or a JSON body")
     if event == "park" and (lat is None or lon is None):
         raise HTTPException(400, "park needs lat and lon")
-    return (await loop.run_in_executor(None, stops_ingest, [{"event": event, "lat": lat, "lon": lon, "at": at}]))[0]
+    return (await loop.run_in_executor(None, stops_ingest, [{"event": event, "lat": lat, "lon": lon, "at": at}], None, who.name))[0]
 
 
 @app.get("/tools/stops/status")
@@ -2624,7 +2713,13 @@ async def stops_status(who: Who = Depends(need("display"))):
     p = d["pending"]
     return {"last_upload": d["last_upload"], "last_error": d["last_error"], "last_event_at": d["last_at"] or None,
             "parked_since": p["at"] if p else None, "stops": len(d["stops"]),
-            "pins": len(_stop_pins(d["stops"], STOP_MERGE_M)), "now": time.time()}
+            "pins": len(_stop_pins(d["stops"], STOP_MERGE_M)), "now": time.time(), "compare": _compare_counts()}
+
+
+def _compare_counts():
+    c = stops_compare()
+    return {"since": c["since"], "days": c["days"], "both": len(c["both"]), "missed": len(c["only_a"]),
+            "batbelt_only": len(c["only_b"])}
 
 
 async def _soft(coro, what):
@@ -3771,6 +3866,7 @@ form button{padding:12px 14px}
  <div class="sub" id="tl-plug"></div>
  <div class="sub" id="tl-pc"></div>
  <div class="sub" id="tl-stops"></div>
+ <div class="sub" id="tl-cmp"></div>
  <div class="sub" id="tl-prep"></div>
 </div>
 </div>
@@ -3964,6 +4060,14 @@ async function toolsInfo(){
       if(j.parked_since)t.push('car parked since '+ago(j.parked_since,j.now));
       if(j.last_error)t.push('last problem: '+j.last_error.msg+' ('+ago(j.last_error.at,j.now)+')');
       a.textContent=t.join('. ')+'.';
+      var c=j.compare,o=document.getElementById('tl-cmp');
+      if(!c||!c.since)o.textContent='BatBelt vs Shortcuts: nothing logged yet.';
+      else{
+        var n=c.both+c.missed;
+        o.textContent='BatBelt vs Shortcuts, last '+c.days+' days (since '+new Date(c.since*1000).toLocaleDateString([],{month:'short',day:'numeric'})+'): '
+          +(n?'BatBelt caught '+c.both+' of '+n+' stops'+(c.missed?', missed '+c.missed:''):'no 15 min stops yet')
+          +(c.batbelt_only?', '+c.batbelt_only+' only BatBelt saw':'')+'.';
+      }
     }
     var q=await api('GET','/tools/prepmove/status');
     if(q.ok){
@@ -4475,6 +4579,8 @@ if __name__ == "__main__":
         asyncio.run(pair())
     elif len(sys.argv) > 1 and sys.argv[1] == "token":
         token_cmd(sys.argv[2:])
+    elif len(sys.argv) > 2 and sys.argv[1] == "stops" and sys.argv[2] == "compare":
+        stops_compare_cmd(sys.argv[2:])
     else:
         if not TV_TOKEN:
             sys.exit("TV_TOKEN is not set (put it in tv.env). Refusing to start without auth.")

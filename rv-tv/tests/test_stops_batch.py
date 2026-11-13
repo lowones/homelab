@@ -51,7 +51,7 @@ def ev(kind, t, lat=None, lon=None):
 
 
 def reset():
-    for f in (tv.STOPS_FILE, tv.LOCATION_HISTORY_FILE, LOC):
+    for f in (tv.STOPS_FILE, tv.LOCATION_HISTORY_FILE, LOC, tv._stop_src_file()):
         if f.exists():
             f.unlink()
 
@@ -148,6 +148,30 @@ tv.LOCATION_HISTORY_FILE.write_text("%d|%f|%f|60\n" % (NOW - 4 * H, A[0], A[1]))
 r = tv.stops_ingest([ev("park", NOW - 4 * H + 3 * 3600, A[0], A[1])], now=NOW)
 check("a history fix more than 45 min from the event is not used", r[0].get("tracking") is True, r)
 
+# ---- who sent it: Shortcuts vs BatBelt ---------------------------------------------------------------------------
+reset()
+M = 60.0
+tv.stops_ingest([ev("park", NOW - 5 * H, 45.0, -123.0)], now=NOW - 5 * H, src="carphone")
+tv.stops_ingest([ev("drive", NOW - 4 * H)], now=NOW - 4 * H, src="carphone")
+r = tv.stops_ingest([ev("park", NOW - 5 * H + 3 * M, 45.001, -123.0), ev("drive", NOW - 4 * H + 2 * M)],
+                    now=NOW - 4 * H + 5 * M, src="batbelt")
+src = json.loads(tv._stop_src_file().read_text())
+check("every received event is logged with its sender", [x["src"] for x in src] == ["carphone", "carphone", "batbelt", "batbelt"], src)
+check("...even one the stop log skipped as older", src[2]["result"] == "skipped", src[2])
+tv.stops_ingest([ev("park", NOW - 3 * H, 45.5, -123.5)], now=NOW - 3 * H, src="carphone")      # missed by BatBelt
+tv.stops_ingest([ev("drive", NOW - 2 * H)], now=NOW - 2 * H, src="carphone")
+tv.stops_ingest([ev("park", NOW - 110 * M, 45.6, -123.6)], now=NOW - 110 * M, src="carphone")  # 5 min: too short
+tv.stops_ingest([ev("drive", NOW - 105 * M)], now=NOW - 105 * M, src="carphone")
+tv.stops_ingest([ev("park", NOW - 90 * M, 46.0, -124.0)], now=NOW - 60 * M, src="batbelt")     # BatBelt only
+tv.stops_ingest([ev("park", NOW - 10 * M, 47.0, -125.0)], now=NOW - 10 * M, src="carphone")   # too new to judge
+c = tv.stops_compare(7, now=NOW)
+check("a stop both sent is matched", len(c["both"]) == 1 and c["both"][0]["late_min"] == 3 and c["both"][0]["mins"] == 60, c["both"])
+check("a 1 h Shortcuts stop BatBelt never sent is missed", len(c["only_a"]) == 1 and c["only_a"][0]["mins"] == 60, c["only_a"])
+check("short and too-new Shortcuts parks are not judged", all(x["lat"] not in (45.6, 47.0) for x in c["only_a"] + c["both"]), c)
+check("a park only BatBelt sent is listed", len(c["only_b"]) == 1 and c["only_b"][0]["lat"] == 46.0, c["only_b"])
+check("an event with no sender is not logged", (tv.stops_ingest([ev("drive", NOW)], now=NOW) or True)
+      and len(json.loads(tv._stop_src_file().read_text())) == 10)
+
 # ---- the endpoint ----------------------------------------------------------------------------------------------------
 reset()
 subprocess.run([sys.executable, str(ROOT / "tvserver.py"), "token", "add", "carphone", "--stops"],
@@ -168,6 +192,8 @@ try:
     check("sending the file again says ok and duplicate", r.json().get("ok") is True and r.json().get("duplicate") is True, r.text)
     r = cl.post(url, content=json.dumps([ev("park", NOW - 10 * 60, 45.7, -123.7), ev("drive", NOW - 5 * 60)]))
     check("a list is a batch", r.status_code == 200 and r.json()["received"] == 2 and r.json()["ok"], r.text)
+    check("the endpoint logs the token name as the sender",
+          {x["src"] for x in json.loads(tv._stop_src_file().read_text())} == {"carphone"})
     reset()                                         # the plain-line form, from a clean slate
     line = "park|%s|45.88|-123.88" % iso(NOW - 3 * H)
     r = cl.post(url, content=line + "\n", headers={"Content-Type": "text/plain"})
