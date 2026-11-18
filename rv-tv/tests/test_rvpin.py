@@ -121,6 +121,25 @@ tv.ITIN_SOURCES = []
 r = asyncio.run(tv.current_location())
 check("current_location reports the phone pin", r["source"] == "phone", r)
 
+# ---- move day while pinned: the sheet moves on, the pin is still last night's spot ---------------------------------
+reset()
+tv.set_rv_pin(SB[0], SB[1], 8, "South Beach", "OR", "test")
+put(NOW, SB)
+tv.ITIN_SOURCES = ["test"]
+_itin, _setloc = tv.itinerary_location, tv.newest_set_location
+tv.itinerary_location = lambda day: {"lat": CLOV[0], "lon": CLOV[1], "label": "Cloverdale, OR", "source": "itinerary"}
+tv.newest_set_location = lambda: None
+r = asyncio.run(tv.current_location())
+check("pinned 76 km from today's sheet city: still the pin, and flagged as a move day",
+      r["source"] == "phone" and r.get("schedule") == "Cloverdale, OR", r)
+tv.newest_set_location = lambda: {"lat": CLOV[0], "lon": CLOV[1], "name": "Cloverdale", "at": NOW}
+r = asyncio.run(tv.current_location())
+check("...and a Set location at the sheet city does not replace the pin", r["source"] == "phone" and r.get("schedule"), r)
+tv.itinerary_location = lambda day: {"lat": NEWPORT[0], "lon": NEWPORT[1], "label": "Newport, OR", "source": "itinerary"}
+r = asyncio.run(tv.current_location())
+check("sheet city within 50 km of the pin: not a move day", r["source"] == "phone" and not r.get("schedule"), r)
+tv.itinerary_location, tv.newest_set_location, tv.ITIN_SOURCES = _itin, _setloc, []
+
 # ---- token and endpoints ----------------------------------------------------------------------------------------------
 reset()
 out = subprocess.run([sys.executable, str(ROOT / "tvserver.py"), "token", "add", "batbelt", "--display", "--location"],

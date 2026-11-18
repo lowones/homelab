@@ -1368,8 +1368,8 @@ async def current_location():
                 log.warning("itinerary location failed: %s", e)
         dev = device_location(itin)
         if dev:
-            if itin and _km(dev, itin) > LOC_SHEET_KM and dev["source"] != "phone":   # the sheet and the Mac disagree
-                sl = newest_set_location()
+            if itin and _km(dev, itin) > LOC_SHEET_KM:          # the sheet and where the RV is disagree: move day
+                sl = newest_set_location() if dev["source"] != "phone" else None   # a Set location never beats the pin
                 if sl and _km(sl, itin) <= LOC_SHEET_KM:
                     _note_override(sl)
                     return _with_mac_says({"lat": round(sl["lat"], 2), "lon": round(sl["lon"], 2),
