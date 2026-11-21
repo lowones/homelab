@@ -18,9 +18,13 @@ export default {
   render(el, data) {
     const tv = data.tv;
     el.replaceChildren();
-    if (tv.power !== 'on') { item(el, 'TV is off', false); return; }
-    item(el, 'TV on', true);
-    if (tv.volume != null) item(el, tv.muted ? 'Muted' : 'Volume ' + tv.volume);
-    if (tv.app) item(el, 'Showing ' + (APPS[tv.app] || tv.app));
+    if (tv.power !== 'on') item(el, 'TV is off', false);
+    else {
+      item(el, 'TV on', true);
+      if (tv.volume != null) item(el, tv.muted ? 'Muted' : 'Volume ' + tv.volume);
+      if (tv.app) item(el, 'Showing ' + (APPS[tv.app] || tv.app));
+    }
+    // the light relays (RV_LIGHTS): a lit dot when on, no dot when the relay did not answer
+    for (const l of tv.lights || []) item(el, l.label + (l.on == null ? ' ?' : ''), l.on == null ? undefined : l.on);
   },
 };

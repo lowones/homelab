@@ -223,6 +223,24 @@ dashboard shows, then the phone's off button and the volume keys fail, and the l
 - The real fix is a DHCP reservation for the TV's MAC in the Starlink router; this tool is the safety net.
 - Checks: `python3 tests/test_fixip.py` (no network; stand-in ARP/ifconfig), plus three lines in `smoke.sh`.
 
+## Lights (`lights.py`, Shelly 1 Gen4 relays)
+The RV lights are switched by Shelly 1 Gen4 relays, listed in `tv.env` as `RV_LIGHTS=name=host,...` in the order the phone
+shows them, e.g. `RV_LIGHTS=bedroom=shelly1g4-e83dc1a4c394.local` (mDNS name, like the plug). Adding a light is one more
+`name=host` and a restart; nothing else changes.
+- **Phone:** home > **Bedroom** (above TV apps) and Tools > **Lights** (one button per light). A tap toggles; the button is
+  yellow when on and reads "not answering" when the relay does not answer. The status line ends "bedroom light on".
+  **BatBoard:** the TV strip shows each light with a dot.
+- API: `GET /lights` and the `lights` list in `GET /status` (permission `status`); `POST /lights/{name}/{on|off|toggle}`
+  (permission `power_off`, the same as the TV plug). 404 unknown name, 503 the relay did not answer. Each switch is logged.
+- **Check lights** (Check/Debug; `GET /tools/lights`, `status`): read-only state, wall switch mode and contact, who switched it
+  last, Wi-Fi, firmware, password, with warnings (follow mode out of step with the wall, timers, weak signal, hot).
+- Relay settings (set 2026-11-21): input mode `flip` (any flip of the wall switch toggles the light, so the wall and the
+  phone never fight), `initial_state` `restore_last` (flip mode does not allow `match_input`), no timers, no auth.
+
+## Check cameras (Check/Debug; `GET /tools/cams`, permission `status`)
+Asks go2rtc for one frame of each `TV_CAMS_LIVE` camera's `_sub` stream. A 200 with an empty body means no video; on
+2026-11-15 that was ONVIF switched off in the camera app (turn it back on there before suspecting go2rtc).
+
 ## Power cycle TV (`powercycle.py`, Shelly plug)
 When the TV stops answering (frozen webOS, stuck standby) the only fix is cutting its power. The TV is plugged into a Shelly
 Plug US Gen4 (`SHELLY_PLUG_HOST` in `tv.env`, the plug's mDNS name `shellyplugusg4-<mac>.local`; its IP changes with the

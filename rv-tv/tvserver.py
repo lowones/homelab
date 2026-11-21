@@ -15,6 +15,7 @@ is the TV when the TV is on HDMI_1); POST /display/close removes it.
   TV_DISPLAY_BROWSER  path to a Chrome/Brave/Edge/Firefox binary (default: first one found)
   TV_MAC_INPUT        the TV input the Mac is on (default HDMI_1)
   SHELLY_PLUG_HOST    host name or IP of the smart plug the TV is plugged into (Tools > Power cycle TV)
+  RV_LIGHTS           the light relays, name=host in phone order: bedroom=shelly1g4-e83dc1a4c394.local,... (Tools > Lights)
   TV_WEATHER_URL      weather API base (default Open-Meteo, no key needed)
 """
 import asyncio
@@ -79,6 +80,7 @@ BIND = os.environ.get("TV_BIND", "127.0.0.1")
 SERVER_PORT = int(os.environ.get("TV_SERVER_PORT", "8780"))
 MAC_INPUT = os.environ.get("TV_MAC_INPUT", "HDMI_1")
 PLUG_HOST = os.environ.get("SHELLY_PLUG_HOST", "").strip()
+LIGHTS_SPEC = os.environ.get("RV_LIGHTS", "")
 PC_OFF_S = 10                # how long the plug holds the TV's power off (the plug turns itself back on)
 PC_SETTLE = PC_OFF_S + 2     # seconds before the first wake packet: the TV must have lost power and the plug restored it
 PC_WAIT = 120                # then wait this long for the TV to answer ...
@@ -358,13 +360,14 @@ async def health():
 @app.get("/status")
 async def status(who: Who = Depends(need("status"))):
     state, detail = await tv_probe()
+    lights = await light_states()
     if state == "off":
         # "off" can also mean macOS is blocking this process from the LAN
         # (Local Network privacy) or the TV is on a different network.
         log.warning("status: cannot reach TV at %s:%s: %s", TV_IP, TV_WS_PORT, detail)
-        return {"power": "off", "reason": detail,
+        return {"power": "off", "reason": detail, "lights": lights,
                 "hint": "If the TV is actually on, check macOS Settings > Privacy & Security > Local Network for python."}
-    out = {"power": "on"}
+    out = {"power": "on", "lights": lights}
     if detail:
         out["note"] = detail
     try:
@@ -3677,6 +3680,118 @@ async def powercycle_run(who: Who = Depends(need("power_off"))):
         return {"result": result, "plug_was_on": cut["was_on"], "seconds": took, "message": msg}
 
 
+# ---- lights (Shelly relays, lights.py) --------------------------------------------------------------------------
+# Same permissions as the TV plug: anyone with status sees them, anyone with power_off switches them.
+def lights_mod():
+    """lights.py next to this file (standard library only), imported on first use like powercycle.py."""
+    if str(BASE) not in sys.path:
+        sys.path.insert(0, str(BASE))
+    import lights
+    return lights
+
+
+def light_list():
+    return lights_mod().parse(LIGHTS_SPEC)[0]
+
+
+async def light_states(timeout=2.0):
+    """[{"name", "label", "on": True | False | None}] for every light, asked at the same time. None = did not answer.
+    Short timeout: /status waits for this, and the phone and BatBoard call /status every 15 s."""
+    lm = lights_mod()
+    loop = asyncio.get_running_loop()
+
+    async def one(l):
+        try:
+            on = await loop.run_in_executor(None, lambda: lm.is_on(l["host"], timeout))
+        except lm.PlugError:
+            on = None
+        return {"name": l["name"], "label": l["label"], "on": on}
+    return list(await asyncio.gather(*(one(l) for l in light_list())))
+
+
+@app.get("/lights")
+async def lights_get(who: Who = Depends(need("status"))):
+    return {"lights": await light_states()}
+
+
+@app.post("/lights/{name}/{state}")
+async def lights_set(name: str = PathParam(..., pattern=r"^[a-z][a-z0-9_]{0,23}$"),
+                     state: str = PathParam(..., pattern=r"^(on|off|toggle)$"),
+                     who: Who = Depends(need("power_off"))):
+    """Switches one light. toggle reads the light first. Returns the state read back from the relay."""
+    lm = lights_mod()
+    light = next((l for l in light_list() if l["name"] == name), None)
+    if not light:
+        raise HTTPException(404, "No light called %s. Lights come from RV_LIGHTS in tv.env." % name)
+    loop = asyncio.get_running_loop()
+
+    def work():
+        want = (not lm.is_on(light["host"])) if state == "toggle" else state == "on"
+        return lm.set_on(light["host"], want)
+    try:
+        on = await loop.run_in_executor(None, work)
+    except lm.PlugError as e:
+        log.warning("lights: %s %s by %s failed: %s", name, state, who.name, e)
+        raise HTTPException(503, "The %s light did not answer (%s)." % (light["label"].lower(), e))
+    log.info("lights: %s %s by %s -> %s", name, state, who.name, "on" if on else "off")
+    return {"name": name, "label": light["label"], "on": on}
+
+
+@app.get("/tools/lights")
+async def lights_check(who: Who = Depends(need("status"))):
+    """Check/Debug > Check lights: read-only state, wall switch and settings of every light relay."""
+    lm = lights_mod()
+    lights, problems = lm.parse(LIGHTS_SPEC)
+    if not lights and not problems:
+        raise HTTPException(400, "No lights set up: add RV_LIGHTS to tv.env and restart the service.")
+    loop = asyncio.get_running_loop()
+
+    async def one(l):
+        try:
+            i = await loop.run_in_executor(None, lambda: lm.info(l["host"]))
+        except lm.PlugError as e:
+            return {"name": l["name"], "reachable": False,
+                    "lines": ["\u25b2 %s: did not answer at %s (%s)." % (l["label"], l["host"], e)]}
+        return {"name": l["name"], "reachable": True, "on": i["on"], "warn": bool(i["warnings"]),
+                "lines": lm.describe(l["label"], i)}
+    res = list(await asyncio.gather(*(one(l) for l in lights)))
+    bad = sum(1 for r in res if not r["reachable"])
+    result = "unreachable" if bad else ("warn" if problems or any(r["warn"] for r in res) else "ok")
+    lines = ["\u25b2 " + p for p in problems]
+    for r in res:
+        lines.extend(r["lines"])
+    return {"result": result, "lights": res, "lines": lines}
+
+
+@app.get("/tools/cams")
+async def cams_check(who: Who = Depends(need("status"))):
+    """Check/Debug > Check cameras: asks go2rtc for one frame of each live camera's sub stream. A 200 with an empty
+    body means go2rtc has no video from it; on 2026-11-15 that was ONVIF switched off in the camera app."""
+    if not CAMS_LIVE:
+        raise HTTPException(400, "No cameras set up: TV_CAMS_LIVE is empty.")
+    loop = asyncio.get_running_loop()
+
+    def one(c):
+        url = "%s/api/frame.jpeg?src=%s" % (GO2RTC_URL, urllib.parse.quote(c + "_sub"))
+        try:
+            with urllib.request.urlopen(url, timeout=12) as r:
+                return len(r.read(2_000_000)) > 0, None
+        except urllib.error.HTTPError as e:
+            return False, "HTTP %s" % e.code
+        except (OSError, urllib.error.URLError) as e:
+            return False, str(getattr(e, "reason", None) or e)
+    res = await asyncio.gather(*(loop.run_in_executor(None, one, c) for c in CAMS_LIVE))
+    label = dict(CAMS)
+    lines, bad = [], []
+    for c, (ok, err) in zip(CAMS_LIVE, res):
+        lines.append("%s: %s" % (label.get(c, c), "video ok" if ok else "NO VIDEO" + (" (%s)" % err if err else "")))
+        if not ok:
+            bad.append(label.get(c, c))
+    if bad:
+        lines.append("\u25b2 No video from %s. ONVIF may be off in the camera app: turn it on there first." % ", ".join(bad))
+    return {"result": "warn" if bad else "ok", "bad": bad, "lines": lines}
+
+
 class FreshStatic(StaticFiles):
     """Display files are revalidated on every load (cheap: the ETag answers 304), so a changed widget
     reaches the kiosk at once instead of whenever Chrome decides its cached copy has expired."""
@@ -3705,6 +3820,8 @@ h1{font-size:20px;margin:4px 0 12px}
 button{padding:18px 8px;font:inherit;font-weight:600;border-radius:12px;border:1px solid var(--line);background:var(--card);color:var(--fg)}
 button:active{background:var(--acc);color:#fff}
 button.on{border-color:var(--acc)}
+button.lit{background:#f5c400;border-color:#f5c400;color:#111}
+button.gone{opacity:.5}
 button:disabled{opacity:.5}
 [hidden]{display:none!important}
 form{display:flex;gap:8px;margin-bottom:10px}
@@ -3811,6 +3928,9 @@ form button{padding:12px 14px}
  <button type="button" onclick="go('/display/location?auto=true','Weather now follows the Mac location, then the trip schedule...')">Follow location</button>
 </form>
 <div class="grid">
+ <button class="wide" data-act="power_off" data-light="bedroom" onclick="lightTap('bedroom')">Bedroom</button>
+</div>
+<div class="grid">
  <button class="wide" data-act="app" onclick="view('apps')">TV apps</button>
 </div>
 </div>
@@ -3820,6 +3940,13 @@ form button{padding:12px 14px}
  <button data-act="app" onclick="go('/app/amazon','Opening Prime Video...')">Prime Video</button>
  <button data-act="app" onclick="go('/app/youtube.leanback.v4','Opening YouTube...')">YouTube</button>
  <button onclick="view('main')">Back</button>
+</div>
+</div>
+<div id="v-lights" hidden>
+<div class="grid" id="lt-btns"></div>
+<div class="grid">
+ <button data-act="display" onclick="view('tools')">Back</button>
+ <button data-act="display" onclick="home()">Home</button>
 </div>
 </div>
 <div id="v-cam" hidden>
@@ -3858,6 +3985,7 @@ form button{padding:12px 14px}
  <button data-act="status" onclick="view('check')">Check/Debug</button>
  <button id="pc-go" data-act="power_off" onclick="pcTap()">Power cycle TV</button>
  <button id="pm-go" data-act="display" onclick="pmTap()">Prep for move</button>
+ <button class="wide" data-act="power_off" onclick="view('lights')">Lights</button>
 </div>
 <div id="tl-box">
 <div class="res" id="pm-copy" hidden>
@@ -3868,6 +3996,8 @@ form button{padding:12px 14px}
 <div class="res" id="tl-info">
  <div class="sub" id="tl-fix"></div>
  <div class="sub" id="tl-plug"></div>
+ <div class="sub" id="tl-lights"></div>
+ <div class="sub" id="tl-cams"></div>
  <div class="sub" id="tl-pc"></div>
  <div class="sub" id="tl-stops"></div>
  <div class="sub" id="tl-cmp"></div>
@@ -3882,6 +4012,8 @@ form button{padding:12px 14px}
 <div class="grid">
  <button id="fx-go" data-act="status" onclick="fixIp()">Check TV address</button>
  <button id="pg-go" data-act="status" onclick="plugCheck()">Check TV plug</button>
+ <button id="lc-go" data-act="status" onclick="lightsCheck()">Check lights</button>
+ <button id="cc-go" data-act="status" onclick="camsCheck()">Check cameras</button>
  <button data-act="display" onclick="pmRun(true)">Test the prep</button>
  <button onclick="view('tools')">Back</button>
 </div>
@@ -4027,12 +4159,12 @@ async function batboard(){
 }
 var CUR='main', ntTimer=null;
 function view(v){
-  var titles={main:'RV TV',cam:'BatCam',canny:'Canny',tools:'Tools',check:'Check/Debug',apps:'TV apps',nettest:'Network test',site:'Set location',report:'Report'};
+  var titles={main:'RV TV',cam:'BatCam',canny:'Canny',tools:'Tools',check:'Check/Debug',lights:'Lights',apps:'TV apps',nettest:'Network test',site:'Set location',report:'Report'};
   Object.keys(titles).forEach(function(n){document.getElementById('v-'+n).hidden=(n!==v)});
   document.getElementById('title').textContent=titles[v];
   document.title=titles[v];
   CUR=v;
-  document.getElementById('tvctl').hidden=['report','site','tools','check'].indexOf(v)>=0;   // these get the whole screen
+  document.getElementById('tvctl').hidden=['report','site','tools','check','lights'].indexOf(v)>=0;   // these get the whole screen
   // one results box, shared by Tools and Check/Debug
   var box=document.getElementById('tl-box');
   if(v==='check')document.getElementById('tl-slot').appendChild(box);
@@ -4042,6 +4174,7 @@ function view(v){
   else if(v==='canny'){show('Canny: pick a camera.');loadCams()}
   else if(v==='tools'){show('Tools');toolsInfo()}
   else if(v==='check'){show('Check/Debug');toolsInfo()}
+  else if(v==='lights'){show('Lights: tap one to switch it.');lightsLoad()}
   else if(v==='nettest'){ntRefresh();ntTimer=setInterval(ntRefresh,3000)}
   else if(v==='report'||v==='site'){}
   else refresh();
@@ -4115,6 +4248,75 @@ async function plugCheck(){
     var L=r.j.lines||[];
     show(r.j.result=='ok'?'Plug is fine.':(r.j.result=='warn'?'Plug answers, but check the notes below.':'Plug did not answer.'));
     o.textContent=L.join('\\n');
+  }catch(e){show('Cannot reach the TV box. Are you on the RV Wi-Fi?')}
+  finally{b.disabled=false}
+}
+var LT={list:[],busy:{}};
+function lightsShow(){
+  document.querySelectorAll('[data-light]').forEach(function(b){
+    var l=LT.list.filter(function(x){return x.name===b.dataset.light})[0];
+    if(!l){if(LT.list.length||b.closest('#lt-btns'))b.hidden=true;return}
+    b.hidden=!can(b.dataset.act);
+    b.classList.toggle('lit',l.on===true);b.classList.toggle('gone',l.on==null);
+    b.textContent=l.label+(LT.busy[l.name]?' ...':l.on==null?': not answering':l.on?': on':': off');
+  });
+}
+async function lightsLoad(){
+  try{
+    var r=await api('GET','/lights');
+    if(!r.ok){show(r.j.detail||('Could not read the lights: '+r.status));return}
+    LT.list=r.j.lights||[];
+    var g=document.getElementById('lt-btns');
+    g.innerHTML='';
+    if(!LT.list.length){show('No lights set up yet (RV_LIGHTS in tv.env).');return}
+    LT.list.forEach(function(l){
+      var b=document.createElement('button');
+      b.className='wide';b.dataset.act='power_off';b.dataset.light=l.name;
+      b.onclick=function(){lightTap(l.name)};
+      g.appendChild(b);
+    });
+    lightsShow();
+  }catch(e){show('Cannot reach the TV box. Are you on the RV Wi-Fi?')}
+}
+async function lightTap(name){
+  if(LT.busy[name])return;
+  var l=LT.list.filter(function(x){return x.name===name})[0], lab=l?l.label:name;
+  LT.busy[name]=true;lightsShow();
+  try{
+    var r=await api('POST','/lights/'+name+'/toggle');
+    if(r.status==401){show('This link is not valid any more. Ask Devon for a new one.');return}
+    if(r.status==403){show('Not allowed for your link.');return}
+    if(!r.ok){show(r.j.detail||('Could not switch the light: '+r.status));if(l)l.on=null;return}
+    if(l)l.on=r.j.on;
+    show(lab+' light '+(r.j.on?'on':'off')+'.');
+  }catch(e){show('Cannot reach the TV box. Are you on the RV Wi-Fi?')}
+  finally{LT.busy[name]=false;lightsShow()}
+}
+async function lightsCheck(){
+  var b=document.getElementById('lc-go'),o=document.getElementById('tl-lights');
+  b.disabled=true;o.textContent='';o.style.whiteSpace='pre-line';
+  show('Asking the lights...');
+  try{
+    var r=await api('GET','/tools/lights');
+    if(r.status==401){show('This link is not valid any more. Ask Devon for a new one.');return}
+    if(r.status==403){show('Not allowed for your link.');return}
+    if(!r.ok){show(r.j.detail||('Could not check: '+r.status));return}
+    show(r.j.result=='ok'?'Lights are fine.':(r.j.result=='warn'?'Lights answer, but check the notes below.':'A light did not answer.'));
+    o.textContent=(r.j.lines||[]).join('\\n');
+  }catch(e){show('Cannot reach the TV box. Are you on the RV Wi-Fi?')}
+  finally{b.disabled=false}
+}
+async function camsCheck(){
+  var b=document.getElementById('cc-go'),o=document.getElementById('tl-cams');
+  b.disabled=true;o.textContent='';o.style.whiteSpace='pre-line';
+  show('Asking each camera for a picture (up to 15 s)...');
+  try{
+    var r=await api('GET','/tools/cams');
+    if(r.status==401){show('This link is not valid any more. Ask Devon for a new one.');return}
+    if(r.status==403){show('Not allowed for your link.');return}
+    if(!r.ok){show(r.j.detail||('Could not check: '+r.status));return}
+    show(r.j.result=='ok'?'All cameras have video.':'No video from '+r.j.bad.join(', ')+'.');
+    o.textContent=(r.j.lines||[]).join('\\n');
   }catch(e){show('Cannot reach the TV box. Are you on the RV Wi-Fi?')}
   finally{b.disabled=false}
 }
@@ -4488,6 +4690,9 @@ async function refresh(){
     var j=r.j, line;
     if(j.power!='on'){line='TV is off'}
     else{line='TV is on'+(j.volume!=null?' - volume '+j.volume:'')+(j.muted?' (muted)':'')}
+    LT.list=j.lights||[];lightsShow();
+    var lit=LT.list.filter(function(l){return l.on}).map(function(l){return l.label.toLowerCase()});
+    if(LT.list.length)line+=' - '+(lit.length?lit.join(', ')+' light'+(lit.length>1?'s':'')+' on':'lights off');
     VOL.tv=j.power=='on'&&j.volume!=null?j.volume:null;VOL.muted=!!j.muted;
     if(VOL.tv!=null&&!VOL.touched)document.getElementById('volr').value=VOL.tv;
     volShow();
