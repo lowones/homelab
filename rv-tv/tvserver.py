@@ -4276,6 +4276,7 @@ async function lightsLoad(){
       g.appendChild(b);
     });
     lightsShow();
+    g.hidden=!Array.prototype.some.call(g.children,function(c){return !c.hidden});   // applyPerms hid it while it was empty
   }catch(e){show('Cannot reach the TV box. Are you on the RV Wi-Fi?')}
 }
 async function lightTap(name){

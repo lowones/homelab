@@ -157,6 +157,8 @@ check("home has a Bedroom button above TV apps, on the power_off permission",
       'data-light="bedroom" onclick="lightTap(\'bedroom\')">Bedroom</button>' in page
       and page.index('data-light="bedroom"') < page.index("onclick=\"view('apps')\">TV apps"))
 check("Tools has a Lights button that opens the lights menu", "onclick=\"view('lights')\">Lights</button>" in page and 'id="v-lights"' in page)
+check("the lights menu un-hides its grid once the buttons are in (applyPerms hides empty grids at load)",
+      "g.hidden=!Array.prototype.some.call(g.children" in page[page.index("async function lightsLoad"):page.index("async function lightTap")])
 check("Check/Debug has Check lights and Check cameras with their result lines",
       'onclick="lightsCheck()"' in page and 'onclick="camsCheck()"' in page and 'id="tl-lights"' in page and 'id="tl-cams"' in page)
 node = shutil.which("node")
