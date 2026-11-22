@@ -9,7 +9,7 @@ The wall switch stays in charge too: the relay is set to "flip" (any flip of the
 light switched from the phone can still be switched at the wall, and the two never fight.
 
 Lights come from RV_LIGHTS in tv.env, in the order they show on the phone: "bedroom=shelly1g4-e83dc1a4c394.local,..."
-A name is lower case letters, digits and _; the label is the name with a capital ("Bedroom").
+A name is lower case letters, digits and _; the label is the name with each word capitalised ("Living Room").
 Standard library only (Python 3.9 compatible). tvserver.py calls these from /lights and /tools/lights.
 """
 import re
@@ -33,7 +33,7 @@ def parse(spec):
             problems.append("RV_LIGHTS entry %r is not name=host (or the name is used twice)" % part)
             continue
         seen.add(name)
-        lights.append({"name": name, "label": name.replace("_", " ").capitalize(), "host": host})
+        lights.append({"name": name, "label": " ".join(w.capitalize() for w in name.split("_") if w), "host": host})
     return lights, problems
 
 

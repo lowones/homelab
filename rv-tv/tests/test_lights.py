@@ -103,7 +103,7 @@ s.close()                                   # a port nothing listens on
 # ---- lights.py ---------------------------------------------------------------------------------------------------
 L, probs = lm.parse("bedroom=%s, Living_Room = h2 ,bedroom=h3,bad name=h,=h,x=" % HOST)
 check("parse: order kept, names lower case, labels capitalised",
-      [(l["name"], l["label"]) for l in L] == [("bedroom", "Bedroom"), ("living_room", "Living room")], L)
+      [(l["name"], l["label"]) for l in L] == [("bedroom", "Bedroom"), ("living_room", "Living Room")], L)
 check("parse: a repeated name, a bad name and empty parts are reported, not used", len(probs) == 4, probs)
 check("parse: nothing set means no lights and no problems", lm.parse("") == ([], []))
 
