@@ -480,7 +480,8 @@ CHROMIUM = ["/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
             "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
             "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"]
 FIREFOX = "/Applications/Firefox.app/Contents/MacOS/firefox"
-_weather = {"data": None, "key": None, "next": 0.0, "error": None, "at": None}
+_weather = {"data": None, "key": None, "data_key": None, "next": 0.0, "error": None, "at": None, "failed": False}
+WEATHER_KEEP_KM = 25         # after a failed fetch, keep showing weather fetched up to this far away
 
 
 def find_browser():
@@ -1425,19 +1426,20 @@ def fetch_weather(loc):
 
 
 async def get_weather():
-    """Cached 10 min; after a failure retry in 60 s and serve the last good data meanwhile."""
+    """Cached 10 min; a new place fetches at once. After a failure retry in 60 s (even if the place moved again) and
+    serve the last good data meanwhile, unless it was for a place more than WEATHER_KEEP_KM away."""
     loc = await current_location()
     key = (loc["lat"], loc["lon"])
     now = time.time()
-    if now >= _weather["next"] or _weather["key"] != key:
+    if now >= _weather["next"] or (_weather["key"] != key and not _weather["failed"]):
         try:
             data = await asyncio.get_running_loop().run_in_executor(None, fetch_weather, loc)
-            _weather.update(data=data, key=key, next=now + 600, error=None, at=now)
+            _weather.update(data=data, key=key, data_key=key, next=now + 600, error=None, at=now, failed=False)
         except Exception as e:  # network down, bad JSON, API change...
-            _weather["error"] = str(e) or type(e).__name__
-            _weather["next"] = now + 60
-            if _weather["key"] != key:
-                _weather["data"] = None
+            _weather.update(error=str(e) or type(e).__name__, key=key, next=now + 60, failed=True)
+            dk = _weather["data_key"]
+            if dk and _km({"lat": dk[0], "lon": dk[1]}, loc) > WEATHER_KEEP_KM:
+                _weather.update(data=None, data_key=None, at=None)
             log.warning("weather fetch failed: %s", _weather["error"])
     return {"location": loc["label"], "source": loc["source"], "mac": loc.get("mac"), "data": _weather["data"], "error": _weather["error"],
             "updated": _weather["at"], "schedule": loc.get("schedule")}
