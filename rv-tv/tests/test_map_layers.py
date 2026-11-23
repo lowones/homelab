@@ -220,6 +220,47 @@ check("yesterday is its own field", wx["yesterday"] and wx["yesterday"]["date"] 
 check("days still start with today and keep three days", [d["date"] for d in wx["days"]] == ["2026-10-19", "2026-10-20", "2026-10-21"], wx["days"])
 check("today's sunrise is today's", wx["days"][0]["rise"].startswith("2026-10-19"))
 
+# ---- weather: a failed fetch keeps nearby data and waits 60 s, even when the place moves -----------------
+_calls = []
+_wx_ok = {"temp": 50}
+_place = {"lat": 46.0, "lon": -123.9, "label": "Here", "source": "test"}
+async def _fake_loc():
+    return dict(_place)
+def _fake_fetch(loc):
+    _calls.append((loc["lat"], loc["lon"]))
+    if _fail[0]:
+        raise OSError("handshake timed out")
+    return dict(_wx_ok)
+_fail = [False]
+_orig = (tv.current_location, tv.fetch_weather, tv.time.time)
+_clock = [1000.0]
+tv.current_location, tv.fetch_weather, tv.time.time = _fake_loc, _fake_fetch, lambda: _clock[0]
+try:
+    w = asyncio.run(tv.get_weather())
+    check("weather: first fetch works", w["data"] == _wx_ok and len(_calls) == 1, w)
+    _fail[0] = True
+    _place["lat"] += 0.05                                     # about 5.5 km: a small move
+    w = asyncio.run(tv.get_weather())
+    check("weather: a nearby move fetches at once and, failing, keeps the last data",
+          len(_calls) == 2 and w["data"] == _wx_ok and w["error"] and w["updated"], w)
+    _place["lat"] += 0.0001
+    _clock[0] += 15
+    w = asyncio.run(tv.get_weather())
+    check("weather: after a failure a moving fix does not retry every call", len(_calls) == 2, _calls)
+    _clock[0] += 60
+    asyncio.run(tv.get_weather())
+    check("weather: retries after 60 s", len(_calls) == 3, _calls)
+    _place["lat"] += 1.0                                      # about 110 km: a move day
+    _clock[0] += 60
+    w = asyncio.run(tv.get_weather())
+    check("weather: a far move that fails drops the old place's data", w["data"] is None and w["error"], w)
+    _fail[0] = False
+    _clock[0] += 61
+    w = asyncio.run(tv.get_weather())
+    check("weather: comes back when the service answers", w["data"] == _wx_ok and not w["error"], w)
+finally:
+    tv.current_location, tv.fetch_weather, tv.time.time = _orig
+
 # ---- the JS helpers in map.js -----------------------------------------------------------------------
 node = shutil.which("node")
 if not node:

@@ -89,7 +89,7 @@ export default {
     el.replaceChildren();
     if (!w.data) {
       add(el, 'div', 'wx-error', 'Weather unavailable');
-      add(el, 'div', 'wx-sub', 'The Mac needs internet to fetch it. Trying again soon.');
+      add(el, 'div', 'wx-sub', 'The weather service is not answering. Trying again every minute.');
       drawExtra(el, data.weather_extra);
       drawTides(el, data.tides, new Date());
       return;
